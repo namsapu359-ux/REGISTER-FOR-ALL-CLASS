@@ -116,7 +116,7 @@ const unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const rnd=n=>crypto.getRandomValues(new Uint8Array(n));
 const mkcode=()=>String(100000+crypto.getRandomValues(new Uint32Array(1))[0]%900000);
 const dcode=(s,k)=>String(100000+Math.abs([...s+':'+k].reduce((a,c)=>(a*31+c.charCodeAt(0))|0,7))%900000);
-const prof=async id=>{const r=await sb.from('profiles').select('*').eq('id',id).single();if(r.error)throw r.error;const p=r.data;return{id:p.id,name:p.full_name,role:p.role,cls:p.class_key,sid:p.student_id}};
+const prof=async id=>{const r=await sb.from('profiles').select('*').eq('id',id).maybeSingle();if(r.error)throw Error(r.error.message);if(!r.data){await sb.auth.signOut();throw Error('Signed in, but this account has no profile yet. Admin: run the admin profile SQL (fix-admin.sql) in Supabase. Students: ask your course rep.')}const p=r.data;return{id:p.id,name:p.full_name,role:p.role,cls:p.class_key,sid:p.student_id}};
 
 const api={
  async lookup(cls,sid){
