@@ -76,6 +76,21 @@ button.g{background:transparent;color:var(--pri);border:1.5px solid var(--bd);bo
 .dot{position:fixed;right:10px;bottom:calc(10px + env(safe-area-inset-bottom,0px));width:36px;height:36px;display:grid;place-items:center;cursor:pointer;z-index:5;opacity:.45;transition:opacity .2s}
 .dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot:hover,.dot:focus-visible{opacity:1;outline:0}
 .hint{font-size:13px;color:var(--mut)}
+@media (min-width:900px){
+ main{max-width:1100px;padding:4vh 32px 48px}
+ .brand{margin-bottom:22px;font-size:18px}
+ #app.s-class,#app.s-auth,#app.s-home,#app.s-mark,#app.s-rep,#app.s-adminin{max-width:500px;margin:4vh auto 0}
+ #app.s-repHome,#app.s-admin{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:20px;align-items:start}
+ #app.s-repHome>.msg,#app.s-admin>.msg,#app.s-repHome>button,#app.s-admin>button{grid-column:1/-1}
+ #app.s-repHome>button,#app.s-admin>button{justify-self:start;width:auto;padding:13px 30px}
+ .hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);grid-template-areas:"kick reg" "big reg" "tips reg" "later reg";column-gap:56px;align-content:center;justify-items:start;text-align:left;min-height:min(80vh,640px);padding:44px 60px}
+ .hero .kick{grid-area:kick}.hero .big{grid-area:big;font-size:50px;margin:18px 0 6px}
+ .hero .reg{grid-area:reg;align-self:center;justify-self:center;max-width:400px;margin:0}
+ .hero .tips{grid-area:tips;max-width:480px;height:70px;margin-top:6px}.hero .tips p{justify-content:flex-start;font-size:19px;text-align:left}
+ .hero .later{grid-area:later;max-width:400px}
+ .hero>.fl{display:none}
+ #app>.wide{grid-column:1/-1}
+}
 @media (prefers-reduced-motion:reduce){body::before,.hero,.hero::before,.hero::after,.hero .cap,.pill.on::before,.tk,.plus,.tips p,.clk,.clk::before,.clk::after,.hero>.fl{animation-iteration-count:1!important}.tips p:first-child{opacity:1}}
 </style></head><body><main>
 <div class="brand"><b>🎓</b> Register Platform</div>
@@ -109,7 +124,7 @@ const api={
   const r=await sb.rpc('lookup_student',{p_class:cls,p_sid:sid});if(r.error)throw r.error;const x=r.data&&r.data[0];return x?{name:x.full_name,claimed:x.claimed}:null},
  async signUp(cls,sid,pw){
   if(!live){const r=D.roster.find(r=>r.cls===cls&&r.sid===sid);if(!r)throw Error('Not on roster');if(r.uid)throw Error('Account exists. Please sign in.');const u={id:'u'+sid,sid,name:r.name,pw,cls,role:'student'};D.users.push(u);r.uid=u.id;return u}
-  const {data,error}=await sb.auth.signUp({email:mail(sid),password:pw});if(error)throw error;
+  const {data,error}=await sb.auth.signUp({email:mail(sid),password:pw});if(error)throw Error(/database error|not allowed/i.test(error.message)?'Sign-up is not allowed for this ID. Please check with your course rep.':error.message);
   if(!data.session)throw Error('Account created. Turn off "Confirm email" in Supabase Auth settings, then sign in.');
   const c=await sb.rpc('claim_profile',{p_class:cls,p_sid:sid});if(c.error)throw Error(c.error.message);return prof(data.user.id)},
  async signIn(id,pw,rep){
@@ -169,10 +184,15 @@ const api={
   const r=await sb.rpc('clear_course',{p_course:cid});if(r.error)throw Error(r.error.message)},
  async createRep(name,email,pw,cls){
   if(!live){if(D.users.find(u=>u.email===email))throw Error('That email is already used');D.users.push({id:'r'+Date.now(),email,pw,role:'rep',name,cls});return}
+  const token=b64(rnd(24)).replace(/[+/=]/g,'x');
+  const inv=await sb.rpc('admin_invite_rep',{p_email:email,p_name:name,p_class:cls,p_token:token});if(inv.error)throw Error(inv.error.message);
   const tmp=supabase.createClient(CFG.url,CFG.key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false,storageKey:'tmp-rep'}});
-  const {data,error}=await tmp.auth.signUp({email,password:pw});if(error)throw Error(error.message);
-  if(!data.user)throw Error('Could not create the account');
-  const r=await sb.rpc('admin_make_rep',{p_user:data.user.id,p_name:name,p_class:cls});if(r.error)throw Error(r.error.message)},
+  const {data,error}=await tmp.auth.signUp({email,password:pw,options:{data:{invite:token}}});
+  if(error)throw Error(/database error/i.test(error.message)?'The account could not be created. Please try again.':error.message);
+  if(!data.user)throw Error('Could not create the account')},
+ async changePw(pw){
+  if(!live){const u=D.users.find(u=>u.id===me.id);if(u)u.pw=pw;return}
+  const r=await sb.auth.updateUser({password:pw});if(r.error)throw Error(r.error.message)},
  async listReps(){
   if(!live)return D.users.filter(u=>u.role==='rep').map(u=>({id:u.id,name:u.name,email:u.email,cls:u.cls}));
   const r=await sb.rpc('admin_list_reps');if(r.error)throw Error(r.error.message);return r.data.map(x=>({id:x.id,name:x.full_name,email:x.email,cls:x.class_key}))},
@@ -198,7 +218,7 @@ const back=(t,a)=>`<button class="g" data-a="${a}">${t}</button>`;
 const hhmm=t=>new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
 
 async function render(){
- const a=$('#app');
+ const a=$('#app');a.className='s-'+scr;
  if(scr==='welcome'){const rows=[['A','Ama Mensah'],['K','Kojo Boateng'],['E','Esi Owusu'],['Y','Yaw Darko']];
   a.innerHTML=`<div class="hero"><i class="fl" style="left:6%;top:4%">⏰</i><i class="fl" style="right:6%;top:4%;animation-delay:-1.5s">✅</i>
   <span class="kick">Student attendance</span>
@@ -233,16 +253,17 @@ async function render(){
    if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)} open until ${hhmm(s.closes)}. ${rows.length} marked.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
    else h+=`<br><button class="sm" data-a="open" data-id="${esc(c.id)}">Accept &amp; open</button>${dl}`;h+='</div>'}
   const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
-  a.innerHTML=`${msg}<div class="card"><h2>Class</h2><div>${tags(me.cls)}</div></div>
+  a.innerHTML=`${msg}<div class="card wide"><h2>Class</h2><div>${tags(me.cls)}</div></div>
   <div class="card"><h2>Add courses</h2><p class="s">Add the courses your class is doing this semester. One per line, or separated by commas.</p><textarea id="cn" rows="3" placeholder="Basic Nursing&#10;Medicine"></textarea><button data-a="addc">Add courses</button></div>
   <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload it once. It applies to all your courses. One per line: StudentID, Full name</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
-  ${cs.length?`<div class="card"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div><div><label>Open for</label><select id="mn"><option value="10">10 minutes</option><option value="20">20 minutes</option><option value="60">1 hour</option></select></div></div><p class="s" style="margin-top:10px">Then use a course below. Each course has its own register to download.</p></div>`:''}${h}${back('Sign out','out')}`}
- if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Super admin</h2><p class="s">Database: ${esc(x.mb)} MB of 500 MB. Attendance records: ${esc(x.rows)}.</p><button data-a="wipe">Clear ALL attendance data</button></div>
-  <div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
+  ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div><div><label>Open for</label><select id="mn"><option value="10">10 minutes</option><option value="20">20 minutes</option><option value="60">1 hour</option></select></div></div><p class="s" style="margin-top:10px">Then use a course below. Each course has its own register to download.</p></div>`:''}${h}${back('Sign out','out')}`}
+ if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
   <label>Full name</label><input id="rn" autocomplete="off"><label>Email</label><input id="re" type="email" autocomplete="off"><label>Password (8+ characters)</label><input id="rp" type="password" autocomplete="new-password">
   <label>Rep's class</label><div class="row"><div><select id="ap">${opt(PROG,sel.program)}</select></div><div><select id="ai">${opt(INTK,sel.intake)}</select></div><div><select id="ab">${opt(BATCH,sel.batch)}</select></div><div><select id="al">${opt(LV,sel.level)}</select></div></div>
   <button data-a="mkrep">Create rep account</button></div>
   <div class="card"><h2>Course reps (${reps.length})</h2>${reps.map(r=>`<div style="padding:12px 0;border-bottom:1px solid var(--bd)"><b>${esc(r.name)}</b><div class="hint">${esc(r.email)}</div><div>${tags(r.cls)}</div><button class="sm g" data-a="delrep" data-id="${esc(r.id)}" data-n="${esc(r.name)}">Remove</button></div>`).join('')||'<p class="s">No course reps yet.</p>'}</div>
+  <div class="card"><h2>Change admin password</h2><p class="s">Only you should know this password. Use a long one nobody can guess.</p><label>New password (8+ characters)</label><input id="np" type="password" autocomplete="new-password"><label>Confirm new password</label><input id="np2" type="password" autocomplete="new-password"><button data-a="chpw">Change password</button></div>
+  <div class="card"><h2>Super admin</h2><p class="s">Database: ${esc(x.mb)} MB of 500 MB. Attendance records: ${esc(x.rows)}.</p><button data-a="wipe">Clear ALL attendance data</button></div>
   ${back('Sign out','out')}`}
 }
 
@@ -256,6 +277,7 @@ const act={
  async admin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='admin'){if(live)await sb.auth.signOut();throw Error('Not an admin account')}me=u;go('admin')},
  async mkrep(){const n=$('#rn').value.trim(),e=$('#re').value.trim().toLowerCase(),p=$('#rp').value;if(!n||n.length>100)throw Error('Enter the rep full name');if(!/^\S+@\S+\.\S+$/.test(e))throw Error('Enter a valid email');if(p.length<8)throw Error('Password needs 8+ characters');
   await api.createRep(n,e,p,ck({program:$('#ap').value,intake:$('#ai').value,batch:$('#ab').value,level:$('#al').value}));note('Course rep account created for '+n,'ok');render()},
+ async chpw(){const p=$('#np').value;if(p.length<8)throw Error('Password needs 8+ characters');if(p!==$('#np2').value)throw Error('Passwords do not match');await api.changePw(p);note('Admin password changed','ok');render()},
  async delrep(b){if(!confirm('Remove the account for '+b.dataset.n+'?'))return;await api.delRep(b.dataset.id);note('Account removed','ok');render()},
  editrt:()=>{editRt=!editRt;msg='';render()},
  out(){me=null;st={};editRt=false;if(live)sb.auth.signOut();go('welcome')},
