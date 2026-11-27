@@ -76,6 +76,7 @@ button.g{background:transparent;color:var(--pri);border:1.5px solid var(--bd);bo
 .dot{position:fixed;right:10px;bottom:calc(10px + env(safe-area-inset-bottom,0px));width:36px;height:36px;display:grid;place-items:center;cursor:pointer;z-index:5;opacity:.45;transition:opacity .2s}
 .dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot:hover,.dot:focus-visible{opacity:1;outline:0}
 .hint{font-size:13px;color:var(--mut)}
+#err{margin:0 0 12px;padding:11px 13px;border:1px solid var(--er);border-radius:12px;color:var(--er);background:var(--card);font-size:14px;font-weight:600;word-break:break-word}#err[hidden]{display:none}
 @media (min-width:900px){
  main{max-width:1100px;padding:4vh 32px 48px}
  .brand{margin-bottom:22px;font-size:18px}
@@ -95,6 +96,7 @@ button.g{background:transparent;color:var(--pri);border:1.5px solid var(--bd);bo
 </style></head><body><main>
 <div class="brand"><b>🎓</b> Register Platform</div>
 <p class="s" id="mode"></p>
+<div id="err" hidden></div>
 <div id="app"></div>
 </main>
 <div class="dot" id="adm" role="button" tabindex="0" aria-label="Admin"></div>
@@ -104,6 +106,9 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const live=!!(CFG.url&&CFG.key&&window.supabase);
 const sb=live?supabase.createClient(CFG.url,CFG.key):null;
+const showErr=t=>{const e=$('#err');if(e){e.textContent=t;e.hidden=false}};
+addEventListener('error',e=>showErr('Page error: '+e.message));
+addEventListener('unhandledrejection',e=>showErr('Error: '+((e.reason&&e.reason.message)||e.reason)));
 const PROG=['Regular','Top-up','Access'],INTK=['September','January'],LV=[100,200,300,400];
 const BATCH=Array.from({length:13},(_,i)=>2023+i);
 const CL0='Regular|September|2023|100';
@@ -304,5 +309,7 @@ $('#mode').textContent=live?'':'Demo mode: data is kept in memory only. Demo ID:
 setInterval(()=>document.querySelectorAll('[data-live]').forEach(async el=>{
  if(+el.dataset.exp<=Date.now()&&!el.dataset.busy){el.dataset.busy=1;try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.remove('flip');void el.offsetWidth;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){}el.dataset.busy=''}
  el.style.setProperty('--p',Math.max(0,Math.min(1,(+el.dataset.exp-Date.now())/15e3)));const cd=el.nextElementSibling;if(cd)cd.textContent='New code in '+Math.max(0,Math.ceil((+el.dataset.exp-Date.now())/1e3))+'s'}),1000);
+if(CFG.url&&CFG.key&&!window.supabase)showErr('Could not load the Supabase library, so the site is running in demo mode. Check the internet connection, or whether something is blocking cdn.jsdelivr.net.');
+else if(live)sb.rpc('lookup_student',{p_class:'x',p_sid:'x'}).then(r=>{if(r.error)showErr('Cannot reach the database: '+r.error.message+'. If this mentions permission or not found, run schema-update.sql again.')},e=>showErr('Cannot reach the database: '+e.message));
 render();
 </script></body></html>
