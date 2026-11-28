@@ -129,12 +129,15 @@ const api={
   const r=await sb.rpc('lookup_student',{p_class:cls,p_sid:sid});if(r.error)throw r.error;const x=r.data&&r.data[0];return x?{name:x.full_name,claimed:x.claimed}:null},
  async signUp(cls,sid,pw){
   if(!live){const r=D.roster.find(r=>r.cls===cls&&r.sid===sid);if(!r)throw Error('Not on roster');if(r.uid)throw Error('Account exists. Please sign in.');const u={id:'u'+sid,sid,name:r.name,pw,cls,role:'student'};D.users.push(u);r.uid=u.id;return u}
-  const {data,error}=await sb.auth.signUp({email:mail(sid),password:pw});if(error)throw Error(/database error|not allowed/i.test(error.message)?'Sign-up is not allowed for this ID. Please check with your course rep.':error.message);
+  const t=await sb.rpc('begin_signup',{p_class:cls,p_sid:sid});if(t.error)throw Error(t.error.message);const x=t.data&&t.data[0];if(!x)throw Error('Sign-up is not available for this ID');
+  const {data,error}=await sb.auth.signUp({email:x.login_email,password:pw,options:{data:{ticket:x.claim_ticket}}});
+  if(error)throw Error(/database error|not allowed/i.test(error.message)?'Sign-up is not allowed for this ID. Please check with your course rep.':error.message);
   if(!data.session)throw Error('Account created. Turn off "Confirm email" in Supabase Auth settings, then sign in.');
-  const c=await sb.rpc('claim_profile',{p_class:cls,p_sid:sid});if(c.error)throw Error(c.error.message);return prof(data.user.id)},
- async signIn(id,pw,rep){
+  return prof(data.user.id)},
+ async signIn(id,pw,rep,cls){
   if(!live){const u=D.users.find(u=>(rep?u.email===id&&u.role!=='student':u.sid===id)&&u.pw===pw);if(!u)throw Error('Wrong details');return u}
-  const {data,error}=await sb.auth.signInWithPassword({email:rep?id:mail(id),password:pw});if(error)throw Error('Wrong details');return prof(data.user.id)},
+  let email;if(rep)email=id.toLowerCase();else{const r=await sb.rpc('student_login_email',{p_class:cls,p_sid:id});if(r.error)throw Error(r.error.message);email=r.data;if(!email)throw Error('Wrong details')}
+  const {data,error}=await sb.auth.signInWithPassword({email,password:pw});if(error)throw Error(/not confirmed/i.test(error.message)?'This account is not confirmed yet. Ask the admin to confirm it (see fix-rep.sql).':'Wrong details');return prof(data.user.id)},
  async courses(){
   if(!live)return D.courses.filter(c=>c.cls===me.cls).map(c=>({id:c.id,name:c.name,open:!!D.sess.find(s=>s.course===c.id&&s.closes>Date.now())}));
   const r=await sb.rpc('class_courses');if(r.error)throw r.error;return r.data.map(c=>({id:c.id,name:c.name,open:c.is_open}))},
@@ -146,7 +149,7 @@ const api={
   const r=await sb.from('roster').select('*',{count:'exact',head:true}).eq('class_key',me.cls);return r.count||0},
  async upload(rows){
   if(!live){rows.forEach(x=>{const r=D.roster.find(r=>r.cls===me.cls&&r.sid===x.sid);r?r.name=x.name:D.roster.push({cls:me.cls,sid:x.sid,name:x.name})});return}
-  const r=await sb.from('roster').upsert(rows.map(x=>({class_key:me.cls,student_id:x.sid,full_name:x.name})),{onConflict:'class_key,student_id'});if(r.error)throw Error(r.error.message)},
+  for(let i=0;i<rows.length;i+=500){const r=await sb.from('roster').upsert(rows.slice(i,i+500).map(x=>({class_key:me.cls,student_id:x.sid,full_name:x.name})),{onConflict:'class_key,student_id'});if(r.error)throw Error(r.error.message)}},
  async active(cid){
   if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());return s||null}
   const r=await sb.from('sessions').select('id,closes_at,week').eq('course_id',cid).gt('closes_at',new Date().toISOString()).limit(1);
@@ -173,14 +176,14 @@ const api={
   if(!live){D.cred[me.id]=id;return}
   const r=await sb.from('credentials').insert({user_id:me.id,cred_id:id,public_key:pk});if(r.error)throw r.error},
  async mark(cid,code){
-  if(!live){const sl=Math.floor(Date.now()/15e3),s=D.sess.find(s=>s.course===cid&&s.closes>Date.now()&&[sl,sl-1].some(k=>dcode(s.secret,k)===code));if(!s)throw Error('Wrong or expired code');if(!D.att.find(a=>a.s===s.id&&a.u===me.id))D.att.push({s:s.id,u:me.id,t:Date.now()});return}
+  if(!live){const sl=Math.floor(Date.now()/4e4),gr=Date.now()%4e4<5e3,s=D.sess.find(s=>s.course===cid&&s.closes>Date.now()&&[sl,...(gr?[sl-1]:[])].some(k=>dcode(s.secret,k)===code));if(!s)throw Error('Wrong or expired code');if(!D.att.find(a=>a.s===s.id&&a.u===me.id))D.att.push({s:s.id,u:me.id,t:Date.now()});return}
   const r=await sb.rpc('mark_attendance',{p_course:cid,p_code:code});if(r.error)throw Error(r.error.message);if(r.data!=='ok')throw Error(r.data)},
  async list(s){
   if(!live)return D.att.filter(a=>a.s===s.id).map(a=>{const u=D.users.find(x=>x.id===a.u);return{name:u.name,sid:u.sid,t:a.t}});
   const r=await sb.from('attendance').select('marked_at,profiles(full_name,student_id)').eq('session_id',s.id);
   return (r.data||[]).map(a=>({name:a.profiles.full_name,sid:a.profiles.student_id,t:Date.parse(a.marked_at)}))},
  async liveCode(cid){
-  const sl=Math.floor(Date.now()/15e3),left=15-Math.floor(Date.now()/1e3)%15;
+  const sl=Math.floor(Date.now()/4e4),left=40-Math.floor(Date.now()/1e3)%40;
   if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());if(!s)throw Error('No open session');return{code:dcode(s.secret,sl),left}}
   const r=await sb.rpc('session_code',{p_course:cid});if(r.error)throw r.error;return{code:r.data[0].code,left:r.data[0].secs}},
  async exported(cid){if(!live){D.exp[cid]=1;return}const r=await sb.rpc('mark_exported',{p_course:cid});if(r.error)throw Error(r.error.message)},
@@ -194,7 +197,8 @@ const api={
   const tmp=supabase.createClient(CFG.url,CFG.key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false,storageKey:'tmp-rep'}});
   const {data,error}=await tmp.auth.signUp({email,password:pw,options:{data:{invite:token}}});
   if(error)throw Error(/database error/i.test(error.message)?'The account could not be created. Please try again.':error.message);
-  if(!data.user)throw Error('Could not create the account')},
+  if(!data.user)throw Error('Could not create the account');
+  if(!data.session)throw Error('Account created but NOT confirmed, so the rep cannot sign in yet. In Supabase turn off "Confirm email" (Authentication > Sign In / Providers > Email), then run fix-rep.sql.')},
  async changePw(pw){
   if(!live){const u=D.users.find(u=>u.id===me.id);if(u)u.pw=pw;return}
   const r=await sb.auth.updateUser({password:pw});if(r.error)throw Error(r.error.message)},
@@ -213,7 +217,14 @@ async function enroll(){
  const c=await navigator.credentials.create({publicKey:{challenge:rnd(32),rp:{name:'Register Platform'},user:{id:new TextEncoder().encode(me.id),name:me.sid,displayName:me.name},pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required'},timeout:60000}});
  const cid=b64(c.rawId);await api.saveCred(cid,b64(c.response.getPublicKey?c.response.getPublicKey():new ArrayBuffer(0)));return cid}
 async function verify(cid){await navigator.credentials.get({publicKey:{challenge:rnd(32),allowCredentials:[{type:'public-key',id:unb(cid),transports:['internal']}],userVerification:'required',timeout:60000}})}
-function parseRoster(t){const out=[],seen={};t.split(/\r?\n/).forEach((l,i)=>{const p=l.split(/[,\t;]/).map(x=>x.trim().replace(/^"|"$/g,''));const sid=p[0],name=p.slice(1).join(' ').trim();if(!/^[A-Za-z0-9._-]{1,20}$/.test(sid)||!name||name.length>100||out.length>=3000)return;if(i===0&&/id/i.test(sid)&&/name/i.test(name))return;if(!seen[sid]){seen[sid]=1;out.push({sid,name})}});return out}
+function parseRoster(t){const out=[],seen={};t.split(/\r?\n/).forEach((l,i)=>{const p=l.split(/[,\t;]/).map(x=>x.trim().replace(/^"|"$/g,''));const sid=p[0],name=p.slice(1).join(' ').replace(/[\u0000-\u001f]/g,'').replace(/\s+/g,' ').trim().slice(0,100);if(!/^[A-Za-z0-9._-]{1,20}$/.test(sid)||!name||out.length>=3000)return;if(i===0&&/id/i.test(sid)&&/name/i.test(name))return;if(!seen[sid]){seen[sid]=1;out.push({sid,name})}});return out}
+const rowsToLines=rows=>{let ic=0,nc=[1],st0=0;const h=(rows[0]||[]).map(x=>String(x).toLowerCase()),hi0=h.findIndex(x=>/\b(id|index|matric|reg)\b|number/.test(x)),hi=hi0>=0?hi0:h.findIndex(x=>/^(no\.?|s\/n)$/.test(x)),hn=h.map((x,i)=>/name/.test(x)?i:-1).filter(i=>i>=0);
+ if(hi>=0&&hn.length){ic=hi;nc=hn.slice(0,3);st0=1}return rows.slice(st0).map(r=>[r[ic],...nc.map(i=>r[i])].join('\t')).join('\n')};
+const fileToText=async f=>{if(f.size>1e6)throw Error('File is too big. Use a file under 1 MB with just ID and name columns.');
+ if(/\.(xlsx|xls)$/i.test(f.name)){if(!window.XLSX)throw Error('Excel library did not load. Check your internet connection.');
+  const wb=XLSX.read(await f.arrayBuffer(),{type:'array',sheetRows:3002}),ws=wb.Sheets[wb.SheetNames[0]];if(!ws)throw Error('The Excel file is empty');
+  return rowsToLines(XLSX.utils.sheet_to_json(ws,{header:1,raw:false,blankrows:false,defval:''}))}
+ return f.text()};
 
 const opt=(arr,v)=>arr.map(x=>`<option ${x==v?'selected':''}>${esc(x)}</option>`).join('');
 const tags=c=>c.split('|').map(x=>`<span class="tag">${esc(x)}</span>`).join('');
@@ -245,7 +256,7 @@ async function render(){
  if(scr==='home'){const cs=await api.courses();a.innerHTML=`<div class="card"><h2>${esc(me.name)}</h2><div>${tags(me.cls)}</div><p class="s" style="margin-top:10px">Tap your course. Your course rep must have accepted it first.</p>
  ${cs.map(c=>`<div class="course" data-a="pick" data-id="${esc(c.id)}" data-n="${esc(c.name)}" data-o="${c.open?1:0}"><b>${esc(c.name)}</b><span class="pill ${c.open?'on':''}">${c.open?'Open':'Waiting'}</span></div>`).join('')||'<p class="s">Your course rep has not added courses yet.</p>'}
  <button class="g" data-a="home">Refresh</button>${back('Sign out','out')}${msg}</div>`;return}
- if(scr==='mark'){a.innerHTML=`<div class="card"><h2>${esc(st.cn)}</h2><p class="s">Enter the code on your course rep's screen (it changes every 15 seconds), then confirm with your fingerprint or face.</p>
+ if(scr==='mark'){a.innerHTML=`<div class="card"><h2>${esc(st.cn)}</h2><p class="s">Enter the code on your course rep's screen (it is valid for only 40 seconds), then confirm with your fingerprint or face.</p>
  <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="font-size:24px;text-align:center;letter-spacing:6px">
  <button data-a="mark">👆 Mark my attendance</button>${back('Back','home')}${msg}</div>`;return}
  if(scr==='rep'){a.innerHTML=`<div class="card"><h2>Course rep sign in</h2><label>Email</label><input id="em" type="email"><label>Password</label><input id="pw" type="password">
@@ -257,10 +268,10 @@ async function render(){
    const dl=`<button class="sm g" data-a="xls" data-id="${esc(c.id)}" data-n="${esc(c.name)}">Download Excel</button><button class="sm g" data-a="clr" data-id="${esc(c.id)}">Clear semester data</button>`;
    if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)} open until ${hhmm(s.closes)}. ${rows.length} marked.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
    else h+=`<br><button class="sm" data-a="open" data-id="${esc(c.id)}">Accept &amp; open</button>${dl}`;h+='</div>'}
-  const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
+  const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".xlsx,.xls,.csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
   a.innerHTML=`${msg}<div class="card wide"><h2>Class</h2><div>${tags(me.cls)}</div></div>
   <div class="card"><h2>Add courses</h2><p class="s">Add the courses your class is doing this semester. One per line, or separated by commas.</p><textarea id="cn" rows="3" placeholder="Basic Nursing&#10;Medicine"></textarea><button data-a="addc">Add courses</button></div>
-  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload it once. It applies to all your courses. One per line: StudentID, Full name</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
+  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
   ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div><div><label>Open for</label><select id="mn"><option value="10">10 minutes</option><option value="20">20 minutes</option><option value="60">1 hour</option></select></div></div><p class="s" style="margin-top:10px">Then use a course below. Each course has its own register to download.</p></div>`:''}${h}${back('Sign out','out')}`}
  if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
   <label>Full name</label><input id="rn" autocomplete="off"><label>Email</label><input id="re" type="email" autocomplete="off"><label>Password (8+ characters)</label><input id="rp" type="password" autocomplete="new-password">
@@ -277,7 +288,7 @@ const act={
  async find(){sel={program:$('#program').value,intake:$('#intake').value,batch:$('#batch').value,level:$('#level').value};const sid=$('#sid').value.trim();st.sid=sid;if(!sid)throw Error('Enter your student ID');
   const r=await api.lookup(ck(sel),sid);if(!r)throw Error('ID not found in this class. Check your selections or ask your course rep.');st={sid,cls:ck(sel),name:r.name,tab:r.claimed?'in':'up'};go('auth')},
  tab(b){st.tab=b.dataset.v;msg='';render()},
- async auth(){const pw=$('#pw').value;if(st.tab==='up'){if(pw.length<8)throw Error('Password needs 8+ characters');if(pw!==$('#pw2').value)throw Error('Passwords do not match');me=await api.signUp(st.cls,st.sid,pw)}else me=await api.signIn(st.sid,pw);go('home')},
+ async auth(){const pw=$('#pw').value;if(st.tab==='up'){if(pw.length<8)throw Error('Password needs 8+ characters');if(pw!==$('#pw2').value)throw Error('Passwords do not match');me=await api.signUp(st.cls,st.sid,pw)}else me=await api.signIn(st.sid,pw,false,st.cls);go('home')},
  async repin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='rep'){if(live)await sb.auth.signOut();throw Error('Not a course rep account')}me=u;editRt=false;go('repHome')},
  async admin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='admin'){if(live)await sb.auth.signOut();throw Error('Not an admin account')}me=u;go('admin')},
  async mkrep(){const n=$('#rn').value.trim(),e=$('#re').value.trim().toLowerCase(),p=$('#rp').value;if(!n||n.length>100)throw Error('Enter the rep full name');if(!/^\S+@\S+\.\S+$/.test(e))throw Error('Enter a valid email');if(p.length<8)throw Error('Password needs 8+ characters');
@@ -296,19 +307,19 @@ const act={
  async wipe(){if(prompt('Type CLEAR to delete ALL attendance records for every class')!=='CLEAR')return;await api.wipe();note('All attendance data cleared','ok');render()},
  async close(b){await api.close(b.dataset.id);render()},
  async xls(b){if(!window.XLSX)throw Error('Excel library did not load. Check your internet connection.');const sh=await api.sheet(b.dataset.id);
-  const head=['Student ID','Name',...sh.weeks.map(w=>'Week '+w),'Total'];
-  const body=sh.rows.map(r=>[r.sid,r.name,...sh.weeks.map(w=>r.weeks.includes(w)?'P':''),r.weeks.length]);
+  const head=['ID','Name',...sh.weeks.map(w=>'W'+w),'Total'];
+  const body=sh.rows.map(r=>[r.sid,r.name,...sh.weeks.map(w=>r.weeks.includes(w)?1:''),r.weeks.length]);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([head,...body]),'Attendance');
-  XLSX.writeFile(wb,(b.dataset.n||'course').replace(/[^\w-]+/g,'_')+'_attendance.xlsx');await api.exported(b.dataset.id);note('Register downloaded. You may now clear this course.','ok');render()}
+  XLSX.writeFile(wb,(b.dataset.n||'course').replace(/[^\w-]+/g,'_')+'_attendance.xlsx',{compression:true});await api.exported(b.dataset.id);note('Register downloaded. You may now clear this course.','ok');render()}
 };
 $('#app').addEventListener('click',async e=>{const b=e.target.closest('[data-a]');if(!b)return;try{await act[b.dataset.a](b)}catch(x){note(x.name==='NotAllowedError'?'Biometric check cancelled or blocked on this device/browser.':x.message,'er');render()}});
-$('#app').addEventListener('change',e=>{if(e.target.id==='rf'&&e.target.files[0])e.target.files[0].text().then(t=>{$('#rt').value=t})});
+$('#app').addEventListener('change',async e=>{if(e.target.id!=='rf'||!e.target.files[0])return;try{$('#rt').value=await fileToText(e.target.files[0]);await act.rsave()}catch(x){note(x.message,'er');render()}});
 $('#adm').addEventListener('click',()=>{if(me&&me.role==='admin')return go('admin');me=null;st={};go('adminin')});
 $('#adm').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.target.click()}});
 $('#mode').textContent=live?'':'Demo mode: data is kept in memory only. Demo ID: S001 (Regular, September, 2023, 100).';
 setInterval(()=>document.querySelectorAll('[data-live]').forEach(async el=>{
- if(+el.dataset.exp<=Date.now()&&!el.dataset.busy){el.dataset.busy=1;try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.remove('flip');void el.offsetWidth;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){}el.dataset.busy=''}
- el.style.setProperty('--p',Math.max(0,Math.min(1,(+el.dataset.exp-Date.now())/15e3)));const cd=el.nextElementSibling;if(cd)cd.textContent='New code in '+Math.max(0,Math.ceil((+el.dataset.exp-Date.now())/1e3))+'s'}),1000);
+ if(+el.dataset.exp<=Date.now()&&!el.dataset.busy){el.dataset.busy=1;el.textContent='······';try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.remove('flip');void el.offsetWidth;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){}el.dataset.busy=''}
+ el.style.setProperty('--p',Math.max(0,Math.min(1,(+el.dataset.exp-Date.now())/4e4)));const cd=el.nextElementSibling;if(cd)cd.textContent='Code clears in '+Math.max(0,Math.ceil((+el.dataset.exp-Date.now())/1e3))+'s'}),1000);
 if(CFG.url&&CFG.key&&!window.supabase)showErr('Could not load the Supabase library, so the site is running in demo mode. Check the internet connection, or whether something is blocking cdn.jsdelivr.net.');
 else if(live)sb.rpc('lookup_student',{p_class:'x',p_sid:'x'}).then(r=>{if(r.error)showErr('Cannot reach the database: '+r.error.message+'. If this mentions permission or not found, run schema-update.sql again.')},e=>showErr('Cannot reach the database: '+e.message));
 render();
