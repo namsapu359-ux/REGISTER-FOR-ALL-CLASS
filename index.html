@@ -125,17 +125,17 @@ const prof=async id=>{const r=await sb.from('profiles').select('*').eq('id',id).
 
 const api={
  async lookup(cls,sid){
-  if(!live){const r=D.roster.find(r=>r.cls===cls&&r.sid===sid);return r?{name:r.name,claimed:!!r.uid}:null}
+  if(!live){const r=D.roster.find(r=>r.cls===cls&&alnum(r.sid)===alnum(sid));return r?{name:r.name,claimed:!!r.uid}:null}
   const r=await sb.rpc('lookup_student',{p_class:cls,p_sid:sid});if(r.error)throw r.error;const x=r.data&&r.data[0];return x?{name:x.full_name,claimed:x.claimed}:null},
  async signUp(cls,sid,pw){
-  if(!live){const r=D.roster.find(r=>r.cls===cls&&r.sid===sid);if(!r)throw Error('Not on roster');if(r.uid)throw Error('Account exists. Please sign in.');const u={id:'u'+sid,sid,name:r.name,pw,cls,role:'student'};D.users.push(u);r.uid=u.id;return u}
+  if(!live){const r=D.roster.find(r=>r.cls===cls&&alnum(r.sid)===alnum(sid));if(!r)throw Error('Not on roster');if(r.uid)throw Error('Account exists. Please sign in.');const u={id:'u'+sid,sid,name:r.name,pw,cls,role:'student'};D.users.push(u);r.uid=u.id;return u}
   const t=await sb.rpc('begin_signup',{p_class:cls,p_sid:sid});if(t.error)throw Error(t.error.message);const x=t.data&&t.data[0];if(!x)throw Error('Sign-up is not available for this ID');
   const {data,error}=await sb.auth.signUp({email:x.login_email,password:pw,options:{data:{ticket:x.claim_ticket}}});
   if(error)throw Error(/database error|not allowed/i.test(error.message)?'Sign-up is not allowed for this ID. Please check with your course rep.':error.message);
   if(!data.session)throw Error('Account created. Turn off "Confirm email" in Supabase Auth settings, then sign in.');
   return prof(data.user.id)},
  async signIn(id,pw,rep,cls){
-  if(!live){const u=D.users.find(u=>(rep?u.email===id&&u.role!=='student':u.sid===id)&&u.pw===pw);if(!u)throw Error('Wrong details');return u}
+  if(!live){const u=D.users.find(u=>(rep?u.email===id&&u.role!=='student':alnum(u.sid)===alnum(id))&&u.pw===pw);if(!u)throw Error('Wrong details');return u}
   let email;if(rep)email=id.toLowerCase();else{const r=await sb.rpc('student_login_email',{p_class:cls,p_sid:id});if(r.error)throw Error(r.error.message);email=r.data;if(!email)throw Error('Wrong details')}
   const {data,error}=await sb.auth.signInWithPassword({email,password:pw});if(error)throw Error(/not confirmed/i.test(error.message)?'This account is not confirmed yet. Ask the admin to confirm it (see fix-rep.sql).':'Wrong details');return prof(data.user.id)},
  async courses(){
@@ -144,6 +144,9 @@ const api={
  async addCourses(names){
   if(!live){names.forEach(n=>{if(!D.courses.find(c=>c.cls===me.cls&&c.name===n))D.courses.push({id:'c'+Date.now()+Math.random(),cls:me.cls,name:n})});return}
   const r=await sb.from('courses').upsert(names.map(n=>({class_key:me.cls,name:n})),{onConflict:'class_key,name',ignoreDuplicates:true});if(r.error)throw Error(r.error.message)},
+ async rosterSample(){
+  if(!live)return D.roster.filter(r=>r.cls===me.cls).slice(0,3).map(r=>({student_id:r.sid,full_name:r.name}));
+  const r=await sb.from('roster').select('student_id,full_name').eq('class_key',me.cls).order('student_id').limit(3);return r.data||[]},
  async rosterCount(){
   if(!live)return D.roster.filter(r=>r.cls===me.cls).length;
   const r=await sb.from('roster').select('*',{count:'exact',head:true}).eq('class_key',me.cls);return r.count||0},
@@ -212,13 +215,26 @@ async function enroll(){
  const c=await navigator.credentials.create({publicKey:{challenge:rnd(32),rp:{name:'Register Platform'},user:{id:new TextEncoder().encode(me.id),name:me.sid,displayName:me.name},pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required'},timeout:60000}});
  const cid=b64(c.rawId);await api.saveCred(cid,b64(c.response.getPublicKey?c.response.getPublicKey():new ArrayBuffer(0)));return cid}
 async function verify(cid){await navigator.credentials.get({publicKey:{challenge:rnd(32),allowCredentials:[{type:'public-key',id:unb(cid),transports:['internal']}],userVerification:'required',timeout:60000}})}
-function parseRoster(t){const out=[],seen={};t.split(/\r?\n/).forEach((l,i)=>{const p=l.split(/[,\t;]/).map(x=>x.trim().replace(/^"|"$/g,''));const sid=p[0],name=p.slice(1).join(' ').replace(/[\u0000-\u001f]/g,'').replace(/\s+/g,' ').trim().slice(0,100);if(!/^[A-Za-z0-9._-]{1,20}$/.test(sid)||!name||out.length>=3000)return;if(i===0&&/id/i.test(sid)&&/name/i.test(name))return;if(!seen[sid]){seen[sid]=1;out.push({sid,name})}});return out}
-const rowsToLines=rows=>{let ic=0,nc=[1],st0=0;const h=(rows[0]||[]).map(x=>String(x).toLowerCase()),hi0=h.findIndex(x=>/\b(id|index|matric|reg)\b|number/.test(x)),hi=hi0>=0?hi0:h.findIndex(x=>/^(no\.?|s\/n)$/.test(x)),hn=h.map((x,i)=>/name/.test(x)?i:-1).filter(i=>i>=0);
- if(hi>=0&&hn.length){ic=hi;nc=hn.slice(0,3);st0=1}return rows.slice(st0).map(r=>[r[ic],...nc.map(i=>r[i])].join('\t')).join('\n')};
+const normId=x=>String(x==null?'':x).replace(/\s+/g,'').toUpperCase(),alnum=x=>normId(x).replace(/[^A-Z0-9]/g,'');
+function parseRoster(t){const out=[],seen={},skipped=[];t.split(/\r?\n/).forEach((l,i)=>{if(!l.trim())return;const p=l.split(/[,\t;]/).map(x=>x.trim().replace(/^"|"$/g,''));const sid=normId(p[0]),name=p.slice(1).join(' ').replace(/[\u0000-\u001f]/g,'').replace(/\s+/g,' ').trim().slice(0,100);
+ if(i===0&&/id/i.test(p[0])&&/name/i.test(name))return;
+ if(!/^[A-Za-z0-9._\/-]{1,30}$/.test(sid)){skipped.push('"'+String(p[0]).slice(0,25)+'" is not a valid ID');return}
+ if(!name){skipped.push(sid+' has no name');return}
+ if(out.length>=3000){skipped.push('more than 3000 students');return}
+ if(seen[sid]){skipped.push(sid+' appears twice');return}
+ seen[sid]=1;out.push({sid,name})});out.skipped=skipped;return out}
+const sheetRows=ws=>{const T=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,blankrows:false,defval:''}),V=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,blankrows:false,defval:''});
+ return T.map((r,i)=>r.map((x,j)=>/^\d+(\.\d+)?e\+\d+$/i.test(String(x).trim())&&V[i]?String(V[i][j]):String(x).trim()))};
+const rowsToLines=rows=>{const isId=h=>/\b(id|index|matric|reg|student no)\b|number/.test(h),isNm=h=>/name/.test(h);let hr=-1,ic=0,nc=[1],st0=0;
+ for(let i=0;i<Math.min(rows.length,15);i++){const h=rows[i].map(x=>String(x).toLowerCase());if(h.some(isId)&&h.some(isNm)){hr=i;break}}
+ if(hr>=0){const h=rows[hr].map(x=>String(x).toLowerCase());ic=h.findIndex(isId);nc=h.map((x,i)=>isNm(x)&&i!==ic?i:-1).filter(i=>i>=0).slice(0,3);st0=hr+1}
+ else if(rows.length>1&&rows.slice(0,5).every((r,i)=>/^\d{1,4}\.?$/.test(r[0])&&+r[0]===+rows[0][0]+i)){ic=1;nc=[2]}
+ return rows.slice(st0).map(r=>[r[ic],...nc.map(i=>r[i])].join('\t')).join('\n')};
 const fileToText=async f=>{if(f.size>1e6)throw Error('File is too big. Use a file under 1 MB with just ID and name columns.');
  if(/\.(xlsx|xls)$/i.test(f.name)){if(!window.XLSX)throw Error('Excel library did not load. Check your internet connection.');
-  const wb=XLSX.read(await f.arrayBuffer(),{type:'array',sheetRows:3002}),ws=wb.Sheets[wb.SheetNames[0]];if(!ws)throw Error('The Excel file is empty');
-  return rowsToLines(XLSX.utils.sheet_to_json(ws,{header:1,raw:false,blankrows:false,defval:''}))}
+  const wb=XLSX.read(await f.arrayBuffer(),{type:'array',sheetRows:3002});
+  for(const n of wb.SheetNames){const rows=sheetRows(wb.Sheets[n]).filter(r=>r.some(x=>x!==''));if(rows.length)return rowsToLines(rows)}
+  throw Error('The Excel file is empty')}
  return f.text()};
 
 const opt=(arr,v)=>arr.map(x=>`<option ${x==v?'selected':''}>${esc(x)}</option>`).join('');
@@ -258,7 +274,7 @@ async function render(){
  <button data-a="repin">Sign in</button>${live?'':'<p class="s">Demo: rep@demo.com / rep123</p>'}${back('Back','welcome')}${msg}</div>`;return}
  if(scr==='adminin'){a.innerHTML=`<div class="card"><h2>Admin sign in</h2><label>Email</label><input id="em" type="email" autocomplete="username"><label>Password</label><input id="pw" type="password" autocomplete="current-password">
  <button data-a="admin">Sign in</button>${live?'':'<p class="s">Demo: admin@demo.com / admin123</p>'}${back('Back','welcome')}${msg}</div>`;return}
- if(scr==='repHome'){const cs=await api.courses(),n=await api.rosterCount();let h='';
+ if(scr==='repHome'){const cs=await api.courses(),n=await api.rosterCount(),smp=n?await api.rosterSample():[];let h='';
   for(const c of cs){const s=await api.active(c.id);h+=`<div class="card" style="background:var(--bg)"><b>${esc(c.name)}</b>`;
    const dl=`<button class="sm g" data-a="xls" data-id="${esc(c.id)}" data-n="${esc(c.name)}">Download Excel</button><button class="sm g" data-a="clr" data-id="${esc(c.id)}">Clear semester data</button>`;
    if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-sid="${esc(s.id)}" data-wk="${esc(s.week)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)}: this code is shown once and works for 40 seconds. ${rows.length} marked so far.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
@@ -266,7 +282,7 @@ async function render(){
   const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".xlsx,.xls,.csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
   a.innerHTML=`${msg}<div class="card wide"><h2>Class</h2><div>${tags(me.cls)}</div></div>
   <div class="card"><h2>Add courses</h2><p class="s">Add the courses your class is doing this semester. One per line, or separated by commas.</p><textarea id="cn" rows="3" placeholder="Basic Nursing&#10;Medicine"></textarea><button data-a="addc">Add courses</button></div>
-  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
+  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><div class="tw"><table>${smp.map(r=>`<tr><td>${esc(r.student_id)}</td><td>${esc(r.full_name)}</td></tr>`).join('')}</table></div><p class="s">This is how the first students were read. Their ID must match what they type.</p><label>Check a student ID</label><input id="tid" autocomplete="off" autocapitalize="characters"><button class="sm" data-a="chkid">Check</button><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
   ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div></div><p class="s" style="margin-top:10px">Each time you tap Accept &amp; open, ONE code appears and works for 40 seconds. After that it clears, and you must close and open again to get a new one.</p></div>`:''}${h}${back('Sign out','out')}`}
  if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
   <label>Full name</label><input id="rn" autocomplete="off"><label>Email</label><input id="re" type="email" autocomplete="off"><label>Password (8+ characters)</label><input id="rp" type="password" autocomplete="new-password">
@@ -280,8 +296,8 @@ async function render(){
 
 const act={
  welcome:()=>go('welcome'),start:()=>go('class'),rep:()=>go('rep'),class:()=>go('class'),home:()=>go('home'),repHome:()=>render(),
- async find(){sel={program:$('#program').value,intake:$('#intake').value,batch:$('#batch').value,level:$('#level').value};const sid=$('#sid').value.trim();st.sid=sid;if(!sid)throw Error('Enter your student ID');
-  const r=await api.lookup(ck(sel),sid);if(!r)throw Error('ID not found in this class. Check your selections or ask your course rep.');st={sid,cls:ck(sel),name:r.name,tab:r.claimed?'in':'up'};go('auth')},
+ async find(){sel={program:$('#program').value,intake:$('#intake').value,batch:$('#batch').value,level:$('#level').value};const sid=normId($('#sid').value);st.sid=sid;if(!sid)throw Error('Enter your student ID');
+  const r=await api.lookup(ck(sel),sid);if(!r)throw Error('ID not found in this class. Check your ID, and make sure Program, Intake, Batch and Level match your course rep’s class.');st={sid,cls:ck(sel),name:r.name,tab:r.claimed?'in':'up'};go('auth')},
  tab(b){st.tab=b.dataset.v;msg='';render()},
  async auth(){const pw=$('#pw').value;if(st.tab==='up'){if(pw.length<8)throw Error('Password needs 8+ characters');if(pw!==$('#pw2').value)throw Error('Passwords do not match');me=await api.signUp(st.cls,st.sid,pw)}else me=await api.signIn(st.sid,pw,false,st.cls);go('home')},
  async repin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='rep'){if(live)await sb.auth.signOut();throw Error('Not a course rep account')}me=u;editRt=false;go('repHome')},
@@ -294,7 +310,9 @@ const act={
  out(){me=null;st={};editRt=false;if(live)sb.auth.signOut();go('welcome')},
  pick(b){if(b.dataset.o!=='1'){note('Not open yet. Ask your course rep to accept this course.','er');return render()}st.cid=b.dataset.id;st.cn=b.dataset.n;go('mark')},
  async mark(){const code=$('#code').value.trim();if(!/^\d{6}$/.test(code))throw Error('Enter the 6-digit code');const cid=await enroll();await verify(cid);await api.mark(st.cid,code);note('Attendance marked ✓ for '+st.cn,'ok');render()},
- async rsave(){const rows=parseRoster($('#rt').value);if(!rows.length)throw Error('No valid lines found. Use: StudentID, Full name');await api.upload(rows);editRt=false;note(rows.length+' students saved. This class list now applies to all your courses.','ok');render()},
+ async rsave(){const rows=parseRoster($('#rt').value),sk=rows.skipped;if(!rows.length)throw Error('No valid students found. '+(sk[0]?sk[0]+'. ':'')+'The file needs a Student ID column and a Name column.');
+  await api.upload(rows);editRt=false;note(rows.length+' students saved (for example '+rows[0].sid+', '+rows[0].name+'). This list now applies to all your courses.'+(sk.length?' '+sk.length+' row(s) skipped, e.g. '+sk.slice(0,3).join('; ')+'.':''),'ok');render()},
+ async chkid(){const id=normId($('#tid').value);if(!id)throw Error('Type a student ID to check');const r=await api.lookup(me.cls,id);note(r?id+' is on the class list: '+r.name+(r.claimed?' (already has an account).':' (has not signed up yet).'):id+' is NOT on the class list. Check the spelling, or check the ID column in your Excel file.',r?'ok':'er');render()},
  async addc(){const names=[...new Set($('#cn').value.split(/[\n,;]+/).map(x=>x.trim()).filter(Boolean))];if(!names.length)throw Error('Enter at least one course name');if(names.some(n=>n.length>80))throw Error('Course names must be 80 characters or less');if(names.length>20)throw Error('Add 20 courses at most at a time');
   await api.addCourses(names);note(names.length+(names.length>1?' courses added':' course added'),'ok');render()},
  async open(b){curWeek=+$('#wk').value;await api.open(b.dataset.id,curWeek);msg='';render()},
