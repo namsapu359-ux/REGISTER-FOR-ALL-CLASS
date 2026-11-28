@@ -77,6 +77,7 @@ button.g{background:transparent;color:var(--pri);border:1.5px solid var(--bd);bo
 .dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot:hover,.dot:focus-visible{opacity:1;outline:0}
 .hint{font-size:13px;color:var(--mut)}
 #err{margin:0 0 12px;padding:11px 13px;border:1px solid var(--er);border-radius:12px;color:var(--er);background:var(--card);font-size:14px;font-weight:600;word-break:break-word}#err[hidden]{display:none}
+#emb{margin:0 0 12px;padding:11px 13px;border:1px solid var(--pri);border-radius:12px;background:var(--card);font-size:14px;font-weight:600;word-break:break-word}#emb[hidden]{display:none}#emb a{color:var(--pri)}
 @media (min-width:900px){
  main{max-width:1100px;padding:4vh 32px 48px}
  .brand{margin-bottom:22px;font-size:18px}
@@ -97,6 +98,7 @@ button.g{background:transparent;color:var(--pri);border:1.5px solid var(--bd);bo
 <div class="brand"><b>🎓</b> Register Platform</div>
 <p class="s" id="mode"></p>
 <div id="err" hidden></div>
+<div id="emb" hidden></div>
 <div id="app"></div>
 </main>
 <div class="dot" id="adm" role="button" tabindex="0" aria-label="Admin"></div>
@@ -120,10 +122,16 @@ const b64=b=>btoa(String.fromCharCode(...new Uint8Array(b)));
 const unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const rnd=n=>crypto.getRandomValues(new Uint8Array(n));
 const mkcode=()=>String(100000+crypto.getRandomValues(new Uint32Array(1))[0]%900000);
-const getPos=()=>new Promise((res,rej)=>{if(!navigator.geolocation)return rej(Error('This phone cannot share its location.'));navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy}),e=>rej(Error(e.code===1?'Location is blocked. Allow location for this site in your browser settings, then try again.':'Could not get your location. Turn on GPS and try again.')),{enableHighAccuracy:true,timeout:15000,maximumAge:0})});
+const locErr=e=>{const m=String(e&&e.message||'');
+ if(!window.isSecureContext||/secure origin/i.test(m))return 'This page is not on a secure (https) link, so the phone refuses to share its location. Open the https address of the site.';
+ if(/policy|disabled in this document/i.test(m)||window.self!==window.top)return 'This page is open inside another page or app, which blocks location even when your browser allows it. Open the site in its own browser tab (Chrome or Safari) and try again.';
+ if(/FBAN|FBAV|Instagram|WhatsApp|MicroMessenger|Line\/|Telegram|TikTok|Snapchat|; wv\)/i.test(navigator.userAgent))return 'You are using an app\u2019s built-in browser, which blocks location. Open this link in Chrome or Safari instead.';
+ if(e&&e.code===1)return 'Location is blocked. In Chrome tap the lock icon > Permissions > Location > Allow. If it is already allowed, also check your phone: Settings > Location must be ON (Precise), and your browser app must be allowed to use location. Then reload this page.';
+ return 'Could not get your location. Turn on GPS and try again.'};
+const getPos=()=>new Promise((res,rej)=>{if(!navigator.geolocation)return rej(Error('This phone cannot share its location.'));navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy}),e=>rej(Error(locErr(e))),{enableHighAccuracy:true,timeout:15000,maximumAge:0})});
 let locId=null,lastPos=null;
 const locMsg=()=>lastPos?(lastPos.acc<=60?'📍 Location ready':'📍 Getting a more accurate location…'):'📍 Getting your location… allow it if asked';
-const startLoc=()=>{if(locId!==null||!navigator.geolocation)return;locId=navigator.geolocation.watchPosition(p=>{lastPos={lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy};const e=$('#loc');if(e)e.textContent=locMsg()},e=>{const x=$('#loc');if(x)x.textContent=e.code===1?'📍 Location is blocked. Allow it in your browser settings, then reload.':'📍 Could not get your location. Turn on GPS.'},{enableHighAccuracy:true,maximumAge:5000})};
+const startLoc=()=>{if(locId!==null||!navigator.geolocation)return;locId=navigator.geolocation.watchPosition(p=>{lastPos={lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy};const e=$('#loc');if(e)e.textContent=locMsg()},e=>{const x=$('#loc');if(x)x.textContent='📍 '+locErr(e)},{enableHighAccuracy:true,maximumAge:5000})};
 const stopLoc=()=>{if(locId!==null){navigator.geolocation.clearWatch(locId);locId=null}};
 const posNow=()=>lastPos&&locId!==null&&lastPos.acc<=60?Promise.resolve(lastPos):getPos();
 const dev=()=>{let d='';try{d=localStorage.getItem('dv')||''}catch(e){}if(d.length<20){d=b64(rnd(24)).replace(/[+/=]/g,'x');try{localStorage.setItem('dv',d)}catch(e){}}return d};
@@ -325,6 +333,7 @@ $('#app').addEventListener('input',async e=>{if(e.target.id!=='code')return;cons
 $('#app').addEventListener('change',async e=>{if(e.target.id!=='rf'||!e.target.files[0])return;try{$('#rt').value=await fileToText(e.target.files[0]);await act.rsave()}catch(x){note(x.message,'er');render()}});
 $('#adm').addEventListener('click',()=>{if(me&&me.role==='admin')return go('admin');me=null;st={};go('adminin')});
 $('#adm').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.target.click()}});
+if(window.self!==window.top){const e=$('#emb');e.hidden=false;e.textContent='This page is inside another page, which can block location. For attendance, ';const a=document.createElement('a');a.href=location.href;a.target='_blank';a.rel='noopener';a.textContent='open it in its own tab';e.appendChild(a);e.append('.')}
 $('#mode').textContent=live?'':'Demo mode: data is kept in memory only. Demo ID: S001 (Regular, September, 2023, 100).';
 setInterval(()=>document.querySelectorAll('[data-live]').forEach(async el=>{
  if(el.dataset.done)return;
