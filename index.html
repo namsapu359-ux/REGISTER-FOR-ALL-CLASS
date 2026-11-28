@@ -120,6 +120,15 @@ const b64=b=>btoa(String.fromCharCode(...new Uint8Array(b)));
 const unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const rnd=n=>crypto.getRandomValues(new Uint8Array(n));
 const mkcode=()=>String(100000+crypto.getRandomValues(new Uint32Array(1))[0]%900000);
+const getPos=()=>new Promise((res,rej)=>{if(!navigator.geolocation)return rej(Error('This phone cannot share its location.'));navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy}),e=>rej(Error(e.code===1?'Location is blocked. Allow location for this site in your browser settings, then try again.':'Could not get your location. Turn on GPS and try again.')),{enableHighAccuracy:true,timeout:15000,maximumAge:0})});
+let locId=null,lastPos=null;
+const locMsg=()=>lastPos?(lastPos.acc<=60?'📍 Location ready':'📍 Getting a more accurate location…'):'📍 Getting your location… allow it if asked';
+const startLoc=()=>{if(locId!==null||!navigator.geolocation)return;locId=navigator.geolocation.watchPosition(p=>{lastPos={lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy};const e=$('#loc');if(e)e.textContent=locMsg()},e=>{const x=$('#loc');if(x)x.textContent=e.code===1?'📍 Location is blocked. Allow it in your browser settings, then reload.':'📍 Could not get your location. Turn on GPS.'},{enableHighAccuracy:true,maximumAge:5000})};
+const stopLoc=()=>{if(locId!==null){navigator.geolocation.clearWatch(locId);locId=null}};
+const posNow=()=>lastPos&&locId!==null&&lastPos.acc<=60?Promise.resolve(lastPos):getPos();
+const dev=()=>{let d='';try{d=localStorage.getItem('dv')||''}catch(e){}if(d.length<20){d=b64(rnd(24)).replace(/[+/=]/g,'x');try{localStorage.setItem('dv',d)}catch(e){}}return d};
+const dist=(a,b)=>{const R=6371e3,r=x=>x*Math.PI/180,h=Math.sin(r(b.lat-a.lat)/2)**2+Math.cos(r(a.lat))*Math.cos(r(b.lat))*Math.sin(r(b.lng-a.lng)/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
+const needAcc=p=>{if(!p||!(p.acc<=60))throw Error('Your location is not accurate enough'+(p&&p.acc?' ('+Math.round(p.acc)+' m)':'')+'. Turn on GPS / precise location, stand near a window, and try again.')};
 const dcode=(s,k)=>String(100000+Math.abs([...s+':'+k].reduce((a,c)=>(a*31+c.charCodeAt(0))|0,7))%900000);
 const prof=async id=>{const r=await sb.from('profiles').select('*').eq('id',id).maybeSingle();if(r.error)throw Error(r.error.message);if(!r.data){await sb.auth.signOut();throw Error('Signed in, but this account has no profile yet. Admin: run the admin profile SQL (fix-admin.sql) in Supabase. Students: ask your course rep.')}const p=r.data;return{id:p.id,name:p.full_name,role:p.role,cls:p.class_key,sid:p.student_id}};
 
@@ -127,17 +136,9 @@ const api={
  async lookup(cls,sid){
   if(!live){const r=D.roster.find(r=>r.cls===cls&&alnum(r.sid)===alnum(sid));return r?{name:r.name,claimed:!!r.uid}:null}
   const r=await sb.rpc('lookup_student',{p_class:cls,p_sid:sid});if(r.error)throw r.error;const x=r.data&&r.data[0];return x?{name:x.full_name,claimed:x.claimed}:null},
- async signUp(cls,sid,pw){
-  if(!live){const r=D.roster.find(r=>r.cls===cls&&alnum(r.sid)===alnum(sid));if(!r)throw Error('Not on roster');if(r.uid)throw Error('Account exists. Please sign in.');const u={id:'u'+sid,sid,name:r.name,pw,cls,role:'student'};D.users.push(u);r.uid=u.id;return u}
-  const t=await sb.rpc('begin_signup',{p_class:cls,p_sid:sid});if(t.error)throw Error(t.error.message);const x=t.data&&t.data[0];if(!x)throw Error('Sign-up is not available for this ID');
-  const {data,error}=await sb.auth.signUp({email:x.login_email,password:pw,options:{data:{ticket:x.claim_ticket}}});
-  if(error)throw Error(/database error|not allowed/i.test(error.message)?'Sign-up is not allowed for this ID. Please check with your course rep.':error.message);
-  if(!data.session)throw Error('Account created. Turn off "Confirm email" in Supabase Auth settings, then sign in.');
-  return prof(data.user.id)},
- async signIn(id,pw,rep,cls){
-  if(!live){const u=D.users.find(u=>(rep?u.email===id&&u.role!=='student':alnum(u.sid)===alnum(id))&&u.pw===pw);if(!u)throw Error('Wrong details');return u}
-  let email;if(rep)email=id.toLowerCase();else{const r=await sb.rpc('student_login_email',{p_class:cls,p_sid:id});if(r.error)throw Error(r.error.message);email=r.data;if(!email)throw Error('Wrong details')}
-  const {data,error}=await sb.auth.signInWithPassword({email,password:pw});if(error)throw Error(/not confirmed/i.test(error.message)?'This account is not confirmed yet. Ask the admin to confirm it (see fix-rep.sql).':'Wrong details');return prof(data.user.id)},
+ async signIn(id,pw){
+  if(!live){const u=D.users.find(u=>u.email===id&&u.role!=='student'&&u.pw===pw);if(!u)throw Error('Wrong details');return u}
+  const {data,error}=await sb.auth.signInWithPassword({email:id.toLowerCase(),password:pw});if(error)throw Error(/not confirmed/i.test(error.message)?'This account is not confirmed yet. Ask the admin to confirm it (see fix-rep.sql).':'Wrong details');return prof(data.user.id)},
  async courses(){
   if(!live)return D.courses.filter(c=>c.cls===me.cls).map(c=>({id:c.id,name:c.name,open:!!D.sess.find(s=>s.course===c.id&&s.closes>Date.now())}));
   const r=await sb.rpc('class_courses');if(r.error)throw r.error;return r.data.map(c=>({id:c.id,name:c.name,open:c.is_open}))},
@@ -150,9 +151,13 @@ const api={
  async rosterCount(){
   if(!live)return D.roster.filter(r=>r.cls===me.cls).length;
   const r=await sb.from('roster').select('*',{count:'exact',head:true}).eq('class_key',me.cls);return r.count||0},
- async upload(rows){
-  if(!live){rows.forEach(x=>{const r=D.roster.find(r=>r.cls===me.cls&&r.sid===x.sid);r?r.name=x.name:D.roster.push({cls:me.cls,sid:x.sid,name:x.name})});return}
-  for(let i=0;i<rows.length;i+=500){const r=await sb.from('roster').upsert(rows.slice(i,i+500).map(x=>({class_key:me.cls,student_id:x.sid,full_name:x.name})),{onConflict:'class_key,student_id'});if(r.error)throw Error(r.error.message)}},
+ async replaceRoster(rows,commit){
+  if(!live){const cur=D.roster.filter(r=>r.cls===me.cls),nk=new Set(rows.map(x=>alnum(x.sid))),ok0=new Set(cur.map(r=>alnum(r.sid))),gone=cur.filter(r=>!nk.has(alnum(r.sid)));
+   const res={added:rows.filter(x=>!ok0.has(alnum(x.sid))).length,kept:rows.filter(x=>ok0.has(alnum(x.sid))).length,removed:gone.length};
+   if(commit){D.att=D.att.filter(a=>!gone.some(g=>g.sid===a.sid));
+    D.roster=D.roster.filter(r=>r.cls!==me.cls||nk.has(alnum(r.sid)));rows.forEach(x=>{const r=D.roster.find(r=>r.cls===me.cls&&alnum(r.sid)===alnum(x.sid));r?r.name=x.name:D.roster.push({cls:me.cls,sid:x.sid,name:x.name})})}
+   return res}
+  const r=await sb.rpc('replace_roster',{p_rows:rows.map(x=>({sid:x.sid,name:x.name})),p_commit:commit});if(r.error)throw Error(r.error.message);return r.data[0]},
  async active(cid){
   if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());return s||null}
   const r=await sb.from('sessions').select('id,closes_at,week').eq('course_id',cid).gt('closes_at',new Date().toISOString()).limit(1);
@@ -160,27 +165,30 @@ const api={
  async close(cid){
   if(!live){D.sess.forEach(s=>{if(s.course===cid)s.closes=0});return}
   await sb.from('sessions').update({closes_at:new Date().toISOString()}).eq('course_id',cid).gt('closes_at',new Date().toISOString())},
- async open(cid,week){
-  if(!live){if(D.sess.find(s=>s.course===cid&&s.closes>Date.now()))throw Error('A code is already open. Close it first, or wait for it to clear.');const closes=Date.now()+4e4,secret=mkcode()+Math.random(),o=D.sess.find(s=>s.course===cid&&s.week===week);if(o){o.closes=closes;o.secret=secret}else D.sess.push({id:'s'+Date.now(),course:cid,cls:me.cls,week,secret,closes});return}
-  const r=await sb.rpc('open_session',{p_course:cid,p_week:week});if(r.error)throw Error(r.error.message)},
+ async open(cid,week,pos){
+  needAcc(pos);
+  if(!live){if(D.sess.find(s=>s.course===cid&&s.closes>Date.now()))throw Error('A code is already open. Close it first, or wait for it to clear.');const closes=Date.now()+5e4,secret=mkcode()+Math.random(),o=D.sess.find(s=>s.course===cid&&s.week===week);if(o){Object.assign(o,{closes,secret,lat:pos.lat,lng:pos.lng})}else D.sess.push({id:'s'+Date.now(),course:cid,cls:me.cls,week,secret,closes,lat:pos.lat,lng:pos.lng});return}
+  const r=await sb.rpc('open_session',{p_course:cid,p_week:week,p_lat:pos.lat,p_lng:pos.lng,p_acc:pos.acc});if(r.error)throw Error(r.error.message)},
  async sheet(cid){
-  if(!live){const ss=D.sess.filter(s=>s.course===cid),rows=D.roster.filter(r=>r.cls===me.cls).map(r=>{const u=D.users.find(x=>x.sid===r.sid&&x.cls===r.cls);return{sid:r.sid,name:r.name,weeks:ss.filter(s=>u&&D.att.find(a=>a.s===s.id&&a.u===u.id)).map(s=>s.week)}});return{weeks:[...new Set(ss.map(s=>s.week))].sort((a,b)=>a-b),rows}}
+  if(!live){const ss=D.sess.filter(s=>s.course===cid),rows=D.roster.filter(r=>r.cls===me.cls).map(r=>({sid:r.sid,name:r.name,weeks:ss.filter(s=>D.att.find(a=>a.s===s.id&&a.sid===r.sid)).map(s=>s.week)}));return{weeks:[...new Set(ss.map(s=>s.week))].sort((a,b)=>a-b),rows}}
   const w=await sb.from('sessions').select('week').eq('course_id',cid);let rows=[];
   for(let i=0;;i+=1000){const r=await sb.rpc('course_matrix',{p_course:cid}).range(i,i+999);if(r.error)throw Error(r.error.message);rows=rows.concat(r.data.map(x=>({sid:x.student_id,name:x.full_name,weeks:x.weeks||[]})));if(r.data.length<1000)break}
   return{weeks:[...new Set((w.data||[]).map(x=>x.week))].sort((a,b)=>a-b),rows}},
- async getCred(){
-  if(!live)return D.cred[me.id]||null;
-  const r=await sb.from('credentials').select('cred_id').eq('user_id',me.id).maybeSingle();return r.data?r.data.cred_id:null},
- async saveCred(id,pk){
-  if(!live){D.cred[me.id]=id;return}
-  const r=await sb.from('credentials').insert({user_id:me.id,cred_id:id,public_key:pk});if(r.error)throw r.error},
- async mark(cid,code){
-  if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now()&&dcode(s.secret,0)===code);if(!s)throw Error('Wrong or expired code');if(!D.att.find(a=>a.s===s.id&&a.u===me.id))D.att.push({s:s.id,u:me.id,t:Date.now()});return}
-  const r=await sb.rpc('mark_attendance',{p_course:cid,p_code:code});if(r.error)throw Error(r.error.message);if(r.data!=='ok')throw Error(r.data)},
+ async mark(cls,sid,code,pos){
+  needAcc(pos);
+  if(!live){const r=D.roster.find(r=>r.cls===cls&&alnum(r.sid)===alnum(sid));if(!r)throw Error('ID not found');
+   const s=D.sess.find(s=>s.cls===cls&&s.closes>Date.now()&&dcode(s.secret,0)===code);if(!s)throw Error('Wrong or expired code');
+   const d=Math.round(dist(pos,s));if(d>50)throw Error('You are about '+d+' m from the class. You must be within 50 m to mark attendance.');
+   const out={name:r.name,course:D.courses.find(c=>c.id===s.course).name,week:s.week};
+   if(D.att.find(a=>a.s===s.id&&a.sid===r.sid))return out;
+   if(D.att.find(a=>a.s===s.id&&a.dev===dev()))throw Error('This phone has already been used to mark attendance for another student.');
+   D.att.push({s:s.id,sid:r.sid,t:Date.now(),dev:dev()});return out}
+  const r=await sb.rpc('mark_attendance',{p_class:cls,p_sid:sid,p_code:code,p_lat:pos.lat,p_lng:pos.lng,p_acc:pos.acc,p_device:dev()});if(r.error)throw Error(r.error.message);
+  const x=r.data;if(!x||!x.ok)throw Error((x&&x.msg)||'Could not mark attendance');return x},
  async list(s){
-  if(!live)return D.att.filter(a=>a.s===s.id).map(a=>{const u=D.users.find(x=>x.id===a.u);return{name:u.name,sid:u.sid,t:a.t}});
-  const r=await sb.from('attendance').select('marked_at,profiles(full_name,student_id)').eq('session_id',s.id);
-  return (r.data||[]).map(a=>({name:a.profiles.full_name,sid:a.profiles.student_id,t:Date.parse(a.marked_at)}))},
+  if(!live)return D.att.filter(a=>a.s===s.id).map(a=>{const r=D.roster.find(r=>r.sid===a.sid);return{name:r?r.name:a.sid,sid:a.sid,t:a.t}});
+  const r=await sb.rpc('session_marks',{p_session:s.id});if(r.error)throw Error(r.error.message);
+  return (r.data||[]).map(a=>({name:a.name||a.sid,sid:a.sid,t:Date.parse(a.t)}))},
  async liveCode(cid){
   if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());if(!s)throw Error('No open session');return{code:dcode(s.secret,0),left:Math.ceil((s.closes-Date.now())/1e3)}}
   const r=await sb.rpc('session_code',{p_course:cid});if(r.error)throw r.error;return{code:r.data[0].code,left:r.data[0].secs}},
@@ -210,11 +218,6 @@ const api={
  async wipe(){if(!live){D.sess=[];D.att=[];return}const r=await sb.rpc('admin_clear_all');if(r.error)throw Error(r.error.message)}
 };
 
-async function enroll(){
- const id=await api.getCred();if(id)return id;
- const c=await navigator.credentials.create({publicKey:{challenge:rnd(32),rp:{name:'Register Platform'},user:{id:new TextEncoder().encode(me.id),name:me.sid,displayName:me.name},pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required'},timeout:60000}});
- const cid=b64(c.rawId);await api.saveCred(cid,b64(c.response.getPublicKey?c.response.getPublicKey():new ArrayBuffer(0)));return cid}
-async function verify(cid){await navigator.credentials.get({publicKey:{challenge:rnd(32),allowCredentials:[{type:'public-key',id:unb(cid),transports:['internal']}],userVerification:'required',timeout:60000}})}
 const normId=x=>String(x==null?'':x).replace(/\s+/g,'').toUpperCase(),alnum=x=>normId(x).replace(/[^A-Z0-9]/g,'');
 function parseRoster(t){const out=[],seen={},skipped=[];t.split(/\r?\n/).forEach((l,i)=>{if(!l.trim())return;const p=l.split(/[,\t;]/).map(x=>x.trim().replace(/^"|"$/g,''));const sid=normId(p[0]),name=p.slice(1).join(' ').replace(/[\u0000-\u001f]/g,'').replace(/\s+/g,' ').trim().slice(0,100);
  if(i===0&&/id/i.test(p[0])&&/name/i.test(name))return;
@@ -245,7 +248,7 @@ const back=(t,a)=>`<button class="g" data-a="${a}">${t}</button>`;
 const hhmm=t=>new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
 
 async function render(){
- const a=$('#app');a.className='s-'+scr;
+ const a=$('#app');a.className='s-'+scr;if(scr!=='code'&&scr!=='repHome')stopLoc();else startLoc();
  if(scr==='welcome'){const rows=[['A','Ama Mensah'],['K','Kojo Boateng'],['E','Esi Owusu'],['Y','Yaw Darko']];
   a.innerHTML=`<div class="hero"><i class="fl" style="left:6%;top:4%">⏰</i><i class="fl" style="right:6%;top:4%;animation-delay:-1.5s">✅</i>
   <span class="kick">Student attendance</span>
@@ -253,23 +256,16 @@ async function render(){
   <div class="reg" aria-hidden="true"><div class="plus">+5 marks 🎯</div><div class="rh"><div>📋 Class Register<small>Lecture starts · be on time</small></div><div class="clk"></div></div>
   <ul>${rows.map((r,i)=>`<li><span class="av">${r[0]}</span><span class="nm">${r[1]}</span><span class="tk" style="--t:t${i+1}">✓</span></li>`).join('')}</ul></div>
   <div class="tips"><p style="animation-delay:0s">⏰&nbsp;<span><b>Be punctual</b> to every lecture</span></p><p style="animation-delay:3s">🎯&nbsp;<span>Punctual students can earn <b>5 marks</b></span></p><p style="animation-delay:6s">✅&nbsp;<span>Mark your attendance <b>as soon as class starts</b></span></p></div>
-  <div class="later"><button data-a="start">Sign in to your class</button><button class="g" data-a="rep">I am a course rep</button></div></div>`;return}
- if(scr==='class'){a.innerHTML=`<div class="card"><h2>Sign in to your class</h2><div class="row">
+  <div class="later"><button data-a="start">Mark my attendance</button><button class="g" data-a="rep">I am a course rep</button></div></div>`;return}
+ if(scr==='class'){a.innerHTML=`<div class="card"><h2>Find your class</h2><div class="row">
  <div><label>Program</label><select id="program">${opt(PROG,sel.program)}</select></div><div><label>Intake</label><select id="intake">${opt(INTK,sel.intake)}</select></div>
  <div><label>Batch (year)</label><select id="batch">${opt(BATCH,sel.batch)}</select></div><div><label>Level</label><select id="level">${opt(LV,sel.level)}</select></div></div>
  <label>Student ID</label><input id="sid" autocomplete="off" autocapitalize="characters" value="${esc(st.sid||'')}">
- <button data-a="find">Find me</button>${back('Back','welcome')}${msg}</div>`;return}
- if(scr==='auth'){const up=st.tab==='up';a.innerHTML=`<div class="card"><h2>Hello, ${esc(st.name)} 👋</h2><div>${tags(st.cls)}</div>
- <div class="seg" style="margin-top:12px"><button class="${up?'g':''}" data-a="tab" data-v="in">Sign in</button><button class="${up?'':'g'}" data-a="tab" data-v="up">Create account</button></div>
- <label>${up?'Create a password (8+ characters)':'Password'}</label><input id="pw" type="password" autocomplete="${up?'new-password':'current-password'}">
- ${up?'<label>Confirm password</label><input id="pw2" type="password" autocomplete="new-password">':''}
- <button data-a="auth">${up?'Create account':'Sign in'}</button>${back('Not you?','class')}${msg}</div>`;return}
- if(scr==='home'){const cs=await api.courses();a.innerHTML=`<div class="card"><h2>${esc(me.name)}</h2><div>${tags(me.cls)}</div><p class="s" style="margin-top:10px">Tap your course. Your course rep must have accepted it first.</p>
- ${cs.map(c=>`<div class="course" data-a="pick" data-id="${esc(c.id)}" data-n="${esc(c.name)}" data-o="${c.open?1:0}"><b>${esc(c.name)}</b><span class="pill ${c.open?'on':''}">${c.open?'Open':'Waiting'}</span></div>`).join('')||'<p class="s">Your course rep has not added courses yet.</p>'}
- <button class="g" data-a="home">Refresh</button>${back('Sign out','out')}${msg}</div>`;return}
- if(scr==='mark'){a.innerHTML=`<div class="card"><h2>${esc(st.cn)}</h2><p class="s">Enter the code on your course rep's screen (it works for only 40 seconds after the rep opens), then confirm with your fingerprint or face.</p>
- <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="font-size:24px;text-align:center;letter-spacing:6px">
- <button data-a="mark">👆 Mark my attendance</button>${back('Back','home')}${msg}</div>`;return}
+ <button data-a="find">Continue</button>${back('Back','welcome')}${msg}</div>`;return}
+ if(scr==='code'){a.innerHTML=`<div class="card"><h2>Hello, ${esc(st.name)} 👋</h2><div>${tags(st.cls)}</div><p class="s" style="margin-top:10px">Is this you? Type the 6-digit code your course rep is showing. You must be in the class, and the code works for only 50 seconds.</p>
+ <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="······" style="font-size:30px;text-align:center;letter-spacing:8px">
+ <p class="s" id="loc" style="text-align:center">${locMsg()}</p><button data-a="mark">Mark my attendance</button>${back('Not you?','class')}${msg}</div>`;setTimeout(()=>{const c=$('#code');if(c)c.focus()},60);return}
+ if(scr==='done'){const x=st.done||{};a.innerHTML=`<div class="card" style="text-align:center"><div style="font-size:56px">✅</div><h2>You are marked present</h2><p class="s">${esc(x.name)}<br>${esc(x.course)} · Week ${esc(x.week)}</p><button data-a="out">Done</button></div>`;return}
  if(scr==='rep'){a.innerHTML=`<div class="card"><h2>Course rep sign in</h2><label>Email</label><input id="em" type="email"><label>Password</label><input id="pw" type="password">
  <button data-a="repin">Sign in</button>${live?'':'<p class="s">Demo: rep@demo.com / rep123</p>'}${back('Back','welcome')}${msg}</div>`;return}
  if(scr==='adminin'){a.innerHTML=`<div class="card"><h2>Admin sign in</h2><label>Email</label><input id="em" type="email" autocomplete="username"><label>Password</label><input id="pw" type="password" autocomplete="current-password">
@@ -277,13 +273,13 @@ async function render(){
  if(scr==='repHome'){const cs=await api.courses(),n=await api.rosterCount(),smp=n?await api.rosterSample():[];let h='';
   for(const c of cs){const s=await api.active(c.id);h+=`<div class="card" style="background:var(--bg)"><b>${esc(c.name)}</b>`;
    const dl=`<button class="sm g" data-a="xls" data-id="${esc(c.id)}" data-n="${esc(c.name)}">Download Excel</button><button class="sm g" data-a="clr" data-id="${esc(c.id)}">Clear semester data</button>`;
-   if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-sid="${esc(s.id)}" data-wk="${esc(s.week)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)}: this code is shown once and works for 40 seconds. ${rows.length} marked so far.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
+   if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-sid="${esc(s.id)}" data-wk="${esc(s.week)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)}: this code is shown once and works for 50 seconds. ${rows.length} marked so far.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
    else h+=`<br><button class="sm" data-a="open" data-id="${esc(c.id)}">Accept &amp; open</button>${dl}`;h+='</div>'}
   const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".xlsx,.xls,.csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
   a.innerHTML=`${msg}<div class="card wide"><h2>Class</h2><div>${tags(me.cls)}</div></div>
   <div class="card"><h2>Add courses</h2><p class="s">Add the courses your class is doing this semester. One per line, or separated by commas.</p><textarea id="cn" rows="3" placeholder="Basic Nursing&#10;Medicine"></textarea><button data-a="addc">Add courses</button></div>
-  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><div class="tw"><table>${smp.map(r=>`<tr><td>${esc(r.student_id)}</td><td>${esc(r.full_name)}</td></tr>`).join('')}</table></div><p class="s">This is how the first students were read. Their ID must match what they type.</p><label>Check a student ID</label><input id="tid" autocomplete="off" autocapitalize="characters"><button class="sm" data-a="chkid">Check</button><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
-  ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div></div><p class="s" style="margin-top:10px">Each time you tap Accept &amp; open, ONE code appears and works for 40 seconds. After that it clears, and you must close and open again to get a new one.</p></div>`:''}${h}${back('Sign out','out')}`}
+  <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><div class="tw"><table>${smp.map(r=>`<tr><td>${esc(r.student_id)}</td><td>${esc(r.full_name)}</td></tr>`).join('')}</table></div><p class="s">This is how the first students were read. Their ID must match what they type.</p><label>Check a student ID</label><input id="tid" autocomplete="off" autocapitalize="characters"><button class="sm" data-a="chkid">Check</button><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.${n?' <b>A new file REPLACES the current list; it is not added on.</b>':''}</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
+  ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div></div><p class="s" style="margin-top:10px">Each time you tap Accept &amp; open, ONE code appears and works for 50 seconds. Students must be within 50 m of you to mark, so open it inside the classroom and allow location when asked. After 50 seconds the code clears, and you must open again to get a new one.</p></div>`:''}${h}${back('Sign out','out')}`}
  if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
   <label>Full name</label><input id="rn" autocomplete="off"><label>Email</label><input id="re" type="email" autocomplete="off"><label>Password (8+ characters)</label><input id="rp" type="password" autocomplete="new-password">
   <label>Rep's class</label><div class="row"><div><select id="ap">${opt(PROG,sel.program)}</select></div><div><select id="ai">${opt(INTK,sel.intake)}</select></div><div><select id="ab">${opt(BATCH,sel.batch)}</select></div><div><select id="al">${opt(LV,sel.level)}</select></div></div>
@@ -295,11 +291,9 @@ async function render(){
 }
 
 const act={
- welcome:()=>go('welcome'),start:()=>go('class'),rep:()=>go('rep'),class:()=>go('class'),home:()=>go('home'),repHome:()=>render(),
+ welcome:()=>go('welcome'),start:()=>go('class'),rep:()=>go('rep'),class:()=>go('class'),repHome:()=>render(),
  async find(){sel={program:$('#program').value,intake:$('#intake').value,batch:$('#batch').value,level:$('#level').value};const sid=normId($('#sid').value);st.sid=sid;if(!sid)throw Error('Enter your student ID');
-  const r=await api.lookup(ck(sel),sid);if(!r)throw Error('ID not found in this class. Check your ID, and make sure Program, Intake, Batch and Level match your course rep’s class.');st={sid,cls:ck(sel),name:r.name,tab:r.claimed?'in':'up'};go('auth')},
- tab(b){st.tab=b.dataset.v;msg='';render()},
- async auth(){const pw=$('#pw').value;if(st.tab==='up'){if(pw.length<8)throw Error('Password needs 8+ characters');if(pw!==$('#pw2').value)throw Error('Passwords do not match');me=await api.signUp(st.cls,st.sid,pw)}else me=await api.signIn(st.sid,pw,false,st.cls);go('home')},
+  const r=await api.lookup(ck(sel),sid);if(!r)throw Error('ID not found in this class. Check your ID, and make sure Program, Intake, Batch and Level match your course rep’s class.');st={sid,cls:ck(sel),name:r.name};go('code')},
  async repin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='rep'){if(live)await sb.auth.signOut();throw Error('Not a course rep account')}me=u;editRt=false;go('repHome')},
  async admin(){const u=await api.signIn($('#em').value.trim(),$('#pw').value,true);if(u.role!=='admin'){if(live)await sb.auth.signOut();throw Error('Not an admin account')}me=u;go('admin')},
  async mkrep(){const n=$('#rn').value.trim(),e=$('#re').value.trim().toLowerCase(),p=$('#rp').value;if(!n||n.length>100)throw Error('Enter the rep full name');if(!/^\S+@\S+\.\S+$/.test(e))throw Error('Enter a valid email');if(p.length<8)throw Error('Password needs 8+ characters');
@@ -308,14 +302,15 @@ const act={
  async delrep(b){if(!confirm('Remove the account for '+b.dataset.n+'?'))return;await api.delRep(b.dataset.id);note('Account removed','ok');render()},
  editrt:()=>{editRt=!editRt;msg='';render()},
  out(){me=null;st={};editRt=false;if(live)sb.auth.signOut();go('welcome')},
- pick(b){if(b.dataset.o!=='1'){note('Not open yet. Ask your course rep to accept this course.','er');return render()}st.cid=b.dataset.id;st.cn=b.dataset.n;go('mark')},
- async mark(){const code=$('#code').value.trim();if(!/^\d{6}$/.test(code))throw Error('Enter the 6-digit code');const cid=await enroll();await verify(cid);await api.mark(st.cid,code);note('Attendance marked ✓ for '+st.cn,'ok');render()},
+ async mark(){if(st.busy)return;const code=$('#code').value.replace(/\D/g,'');if(code.length!==6)throw Error('Enter the 6-digit code');st.busy=1;try{const pos=await posNow();st.done=await api.mark(st.cls,st.sid,code,pos);go('done')}finally{st.busy=0}},
  async rsave(){const rows=parseRoster($('#rt').value),sk=rows.skipped;if(!rows.length)throw Error('No valid students found. '+(sk[0]?sk[0]+'. ':'')+'The file needs a Student ID column and a Name column.');
-  await api.upload(rows);editRt=false;note(rows.length+' students saved (for example '+rows[0].sid+', '+rows[0].name+'). This list now applies to all your courses.'+(sk.length?' '+sk.length+' row(s) skipped, e.g. '+sk.slice(0,3).join('; ')+'.':''),'ok');render()},
- async chkid(){const id=normId($('#tid').value);if(!id)throw Error('Type a student ID to check');const r=await api.lookup(me.cls,id);note(r?id+' is on the class list: '+r.name+(r.claimed?' (already has an account).':' (has not signed up yet).'):id+' is NOT on the class list. Check the spelling, or check the ID column in your Excel file.',r?'ok':'er');render()},
+  const pv=await api.replaceRoster(rows,false),first=!(pv.kept+pv.removed);
+  if(pv.removed>0&&!confirm('This REPLACES your class list with the '+rows.length+' students in the new file.\n\n'+pv.added+' new, '+pv.kept+' kept, '+pv.removed+' removed.\nRemoved students lose their account and attendance marks.\n\nContinue?')){note('Cancelled. Your class list was not changed.');return render()}
+  const r=await api.replaceRoster(rows,true);editRt=false;note((first?'Class list saved: ':'Class list replaced: ')+rows.length+' students ('+r.added+' new, '+r.kept+' kept, '+r.removed+' removed). For example '+rows[0].sid+', '+rows[0].name+'.'+(sk.length?' '+sk.length+' row(s) skipped, e.g. '+sk.slice(0,3).join('; ')+'.':''),'ok');render()},
+ async chkid(){const id=normId($('#tid').value);if(!id)throw Error('Type a student ID to check');const r=await api.lookup(me.cls,id);note(r?id+' is on the class list: '+r.name+'.':id+' is NOT on the class list. Check the spelling, or check the ID column in your Excel file.',r?'ok':'er');render()},
  async addc(){const names=[...new Set($('#cn').value.split(/[\n,;]+/).map(x=>x.trim()).filter(Boolean))];if(!names.length)throw Error('Enter at least one course name');if(names.some(n=>n.length>80))throw Error('Course names must be 80 characters or less');if(names.length>20)throw Error('Add 20 courses at most at a time');
   await api.addCourses(names);note(names.length+(names.length>1?' courses added':' course added'),'ok');render()},
- async open(b){curWeek=+$('#wk').value;await api.open(b.dataset.id,curWeek);msg='';render()},
+ async open(b){curWeek=+$('#wk').value;b.textContent='Getting your location…';const pos=await posNow();await api.open(b.dataset.id,curWeek,pos);msg='';render()},
  async clr(b){if(!confirm('Delete all attendance records for this course? Keep your downloaded Excel file safe.'))return;await api.clear(b.dataset.id);note('Course data cleared','ok');render()},
  async wipe(){if(prompt('Type CLEAR to delete ALL attendance records for every class')!=='CLEAR')return;await api.wipe();note('All attendance data cleared','ok');render()},
  async close(b){await api.close(b.dataset.id);render()},
@@ -325,7 +320,8 @@ const act={
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([head,...body]),'Attendance');
   XLSX.writeFile(wb,(b.dataset.n||'course').replace(/[^\w-]+/g,'_')+'_attendance.xlsx',{compression:true});await api.exported(b.dataset.id);note('Register downloaded. You may now clear this course.','ok');render()}
 };
-$('#app').addEventListener('click',async e=>{const b=e.target.closest('[data-a]');if(!b)return;try{await act[b.dataset.a](b)}catch(x){note(x.name==='NotAllowedError'?'Biometric check cancelled or blocked on this device/browser.':x.message,'er');render()}});
+$('#app').addEventListener('click',async e=>{const b=e.target.closest('[data-a]');if(!b)return;try{await act[b.dataset.a](b)}catch(x){note(x.message,'er');render()}});
+$('#app').addEventListener('input',async e=>{if(e.target.id!=='code')return;const v=e.target.value.replace(/\D/g,'');e.target.value=v;if(v.length===6){try{await act.mark()}catch(x){note(x.message,'er');render()}}});
 $('#app').addEventListener('change',async e=>{if(e.target.id!=='rf'||!e.target.files[0])return;try{$('#rt').value=await fileToText(e.target.files[0]);await act.rsave()}catch(x){note(x.message,'er');render()}});
 $('#adm').addEventListener('click',()=>{if(me&&me.role==='admin')return go('admin');me=null;st={};go('adminin')});
 $('#adm').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.target.click()}});
@@ -337,8 +333,8 @@ setInterval(()=>document.querySelectorAll('[data-live]').forEach(async el=>{
   try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){return finish('This code has already expired.')}
   el.dataset.busy=''}
  const left=+el.dataset.exp-Date.now();
- if(left<=0)return finish('The 40-second code has cleared.');
- el.style.setProperty('--p',Math.max(0,Math.min(1,left/4e4)));const cd=el.nextElementSibling;if(cd)cd.textContent='Code clears in '+Math.ceil(left/1e3)+'s'}),1000);
+ if(left<=0)return finish('The 50-second code has cleared.');
+ el.style.setProperty('--p',Math.max(0,Math.min(1,left/5e4)));const cd=el.nextElementSibling;if(cd)cd.textContent='Code clears in '+Math.ceil(left/1e3)+'s'}),1000);
 if(CFG.url&&CFG.key&&!window.supabase)showErr('Could not load the Supabase library, so the site is running in demo mode. Check the internet connection, or whether something is blocking cdn.jsdelivr.net.');
 else if(live)sb.rpc('lookup_student',{p_class:'x',p_sid:'x'}).then(r=>{if(r.error)showErr('Cannot reach the database: '+r.error.message+'. If this mentions permission or not found, run schema-update.sql again.')},e=>showErr('Cannot reach the database: '+e.message));
 render();
