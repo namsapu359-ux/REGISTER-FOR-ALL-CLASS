@@ -157,13 +157,9 @@ const api={
  async close(cid){
   if(!live){D.sess.forEach(s=>{if(s.course===cid)s.closes=0});return}
   await sb.from('sessions').update({closes_at:new Date().toISOString()}).eq('course_id',cid).gt('closes_at',new Date().toISOString())},
- async open(cid,mins,week){
-  await this.close(cid);const secret=mkcode()+Math.random(),closes=Date.now()+mins*6e4;
-  if(!live){const o=D.sess.find(s=>s.course===cid&&s.week===week);if(o){o.closes=closes}else D.sess.push({id:'s'+Date.now(),course:cid,cls:me.cls,week,secret,closes});return}
-  const row={closes_at:new Date(closes).toISOString()};
-  const ex=await sb.from('sessions').select('id').eq('course_id',cid).eq('week',week).limit(1);
-  const r=ex.data&&ex.data[0]?await sb.from('sessions').update(row).eq('id',ex.data[0].id):await sb.from('sessions').insert({...row,course_id:cid,class_key:me.cls,week});
-  if(r.error)throw Error(r.error.message)},
+ async open(cid,week){
+  if(!live){if(D.sess.find(s=>s.course===cid&&s.closes>Date.now()))throw Error('A code is already open. Close it first, or wait for it to clear.');const closes=Date.now()+4e4,secret=mkcode()+Math.random(),o=D.sess.find(s=>s.course===cid&&s.week===week);if(o){o.closes=closes;o.secret=secret}else D.sess.push({id:'s'+Date.now(),course:cid,cls:me.cls,week,secret,closes});return}
+  const r=await sb.rpc('open_session',{p_course:cid,p_week:week});if(r.error)throw Error(r.error.message)},
  async sheet(cid){
   if(!live){const ss=D.sess.filter(s=>s.course===cid),rows=D.roster.filter(r=>r.cls===me.cls).map(r=>{const u=D.users.find(x=>x.sid===r.sid&&x.cls===r.cls);return{sid:r.sid,name:r.name,weeks:ss.filter(s=>u&&D.att.find(a=>a.s===s.id&&a.u===u.id)).map(s=>s.week)}});return{weeks:[...new Set(ss.map(s=>s.week))].sort((a,b)=>a-b),rows}}
   const w=await sb.from('sessions').select('week').eq('course_id',cid);let rows=[];
@@ -176,15 +172,14 @@ const api={
   if(!live){D.cred[me.id]=id;return}
   const r=await sb.from('credentials').insert({user_id:me.id,cred_id:id,public_key:pk});if(r.error)throw r.error},
  async mark(cid,code){
-  if(!live){const sl=Math.floor(Date.now()/4e4),gr=Date.now()%4e4<5e3,s=D.sess.find(s=>s.course===cid&&s.closes>Date.now()&&[sl,...(gr?[sl-1]:[])].some(k=>dcode(s.secret,k)===code));if(!s)throw Error('Wrong or expired code');if(!D.att.find(a=>a.s===s.id&&a.u===me.id))D.att.push({s:s.id,u:me.id,t:Date.now()});return}
+  if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now()&&dcode(s.secret,0)===code);if(!s)throw Error('Wrong or expired code');if(!D.att.find(a=>a.s===s.id&&a.u===me.id))D.att.push({s:s.id,u:me.id,t:Date.now()});return}
   const r=await sb.rpc('mark_attendance',{p_course:cid,p_code:code});if(r.error)throw Error(r.error.message);if(r.data!=='ok')throw Error(r.data)},
  async list(s){
   if(!live)return D.att.filter(a=>a.s===s.id).map(a=>{const u=D.users.find(x=>x.id===a.u);return{name:u.name,sid:u.sid,t:a.t}});
   const r=await sb.from('attendance').select('marked_at,profiles(full_name,student_id)').eq('session_id',s.id);
   return (r.data||[]).map(a=>({name:a.profiles.full_name,sid:a.profiles.student_id,t:Date.parse(a.marked_at)}))},
  async liveCode(cid){
-  const sl=Math.floor(Date.now()/4e4),left=40-Math.floor(Date.now()/1e3)%40;
-  if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());if(!s)throw Error('No open session');return{code:dcode(s.secret,sl),left}}
+  if(!live){const s=D.sess.find(s=>s.course===cid&&s.closes>Date.now());if(!s)throw Error('No open session');return{code:dcode(s.secret,0),left:Math.ceil((s.closes-Date.now())/1e3)}}
   const r=await sb.rpc('session_code',{p_course:cid});if(r.error)throw r.error;return{code:r.data[0].code,left:r.data[0].secs}},
  async exported(cid){if(!live){D.exp[cid]=1;return}const r=await sb.rpc('mark_exported',{p_course:cid});if(r.error)throw Error(r.error.message)},
  async clear(cid){
@@ -256,7 +251,7 @@ async function render(){
  if(scr==='home'){const cs=await api.courses();a.innerHTML=`<div class="card"><h2>${esc(me.name)}</h2><div>${tags(me.cls)}</div><p class="s" style="margin-top:10px">Tap your course. Your course rep must have accepted it first.</p>
  ${cs.map(c=>`<div class="course" data-a="pick" data-id="${esc(c.id)}" data-n="${esc(c.name)}" data-o="${c.open?1:0}"><b>${esc(c.name)}</b><span class="pill ${c.open?'on':''}">${c.open?'Open':'Waiting'}</span></div>`).join('')||'<p class="s">Your course rep has not added courses yet.</p>'}
  <button class="g" data-a="home">Refresh</button>${back('Sign out','out')}${msg}</div>`;return}
- if(scr==='mark'){a.innerHTML=`<div class="card"><h2>${esc(st.cn)}</h2><p class="s">Enter the code on your course rep's screen (it is valid for only 40 seconds), then confirm with your fingerprint or face.</p>
+ if(scr==='mark'){a.innerHTML=`<div class="card"><h2>${esc(st.cn)}</h2><p class="s">Enter the code on your course rep's screen (it works for only 40 seconds after the rep opens), then confirm with your fingerprint or face.</p>
  <input id="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="font-size:24px;text-align:center;letter-spacing:6px">
  <button data-a="mark">👆 Mark my attendance</button>${back('Back','home')}${msg}</div>`;return}
  if(scr==='rep'){a.innerHTML=`<div class="card"><h2>Course rep sign in</h2><label>Email</label><input id="em" type="email"><label>Password</label><input id="pw" type="password">
@@ -266,13 +261,13 @@ async function render(){
  if(scr==='repHome'){const cs=await api.courses(),n=await api.rosterCount();let h='';
   for(const c of cs){const s=await api.active(c.id);h+=`<div class="card" style="background:var(--bg)"><b>${esc(c.name)}</b>`;
    const dl=`<button class="sm g" data-a="xls" data-id="${esc(c.id)}" data-n="${esc(c.name)}">Download Excel</button><button class="sm g" data-a="clr" data-id="${esc(c.id)}">Clear semester data</button>`;
-   if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)} open until ${hhmm(s.closes)}. ${rows.length} marked.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
+   if(s){const rows=await api.list(s);h+=`<div class="code" data-live="${esc(c.id)}" data-sid="${esc(s.id)}" data-wk="${esc(s.week)}" data-exp="0">······</div><p class="s" style="text-align:center"></p><p class="s" style="text-align:center">Week ${esc(s.week)}: this code is shown once and works for 40 seconds. ${rows.length} marked so far.</p><div class="tw"><table>${rows.slice(-8).reverse().map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.sid)}</td><td>${hhmm(r.t)}</td></tr>`).join('')}</table></div><button class="sm" data-a="repHome">Refresh</button>${dl}<button class="sm g" data-a="close" data-id="${esc(c.id)}">Close</button>`}
    else h+=`<br><button class="sm" data-a="open" data-id="${esc(c.id)}">Accept &amp; open</button>${dl}`;h+='</div>'}
   const upl=`<textarea id="rt" rows="5" placeholder="S001, Ama Mensah&#10;S002, Kojo Boateng"></textarea><input id="rf" type="file" accept=".xlsx,.xls,.csv,.txt" style="margin-top:8px"><button data-a="rsave">Save class list</button>`;
   a.innerHTML=`${msg}<div class="card wide"><h2>Class</h2><div>${tags(me.cls)}</div></div>
   <div class="card"><h2>Add courses</h2><p class="s">Add the courses your class is doing this semester. One per line, or separated by commas.</p><textarea id="cn" rows="3" placeholder="Basic Nursing&#10;Medicine"></textarea><button data-a="addc">Add courses</button></div>
   <div class="card"><h2>Class list</h2>${n&&!editRt?`<p class="s">✓ ${n} students saved. This one list is used for every course, so you never upload it again.</p><button class="g" data-a="editrt">Update class list</button>`:`<p class="s">Upload an Excel (.xlsx) or CSV file with a Student ID column and a Name column, and it saves straight away. Or paste lines below, one per line: StudentID, Full name. You only do this once: it is used for every course.</p>${upl}${n?back('Cancel','editrt'):''}`}</div>
-  ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div><div><label>Open for</label><select id="mn"><option value="10">10 minutes</option><option value="20">20 minutes</option><option value="60">1 hour</option></select></div></div><p class="s" style="margin-top:10px">Then use a course below. Each course has its own register to download.</p></div>`:''}${h}${back('Sign out','out')}`}
+  ${cs.length?`<div class="card wide"><h2>Open attendance</h2><div class="row"><div><label>Week</label><select id="wk">${opt(Array.from({length:20},(_,i)=>i+1),curWeek)}</select></div></div><p class="s" style="margin-top:10px">Each time you tap Accept &amp; open, ONE code appears and works for 40 seconds. After that it clears, and you must close and open again to get a new one.</p></div>`:''}${h}${back('Sign out','out')}`}
  if(scr==='admin'){const x=await api.stats(),reps=await api.listReps();a.innerHTML=`${msg}<div class="card"><h2>Create a course rep account</h2><p class="s">The rep signs in with this email and password using "I am a course rep".</p>
   <label>Full name</label><input id="rn" autocomplete="off"><label>Email</label><input id="re" type="email" autocomplete="off"><label>Password (8+ characters)</label><input id="rp" type="password" autocomplete="new-password">
   <label>Rep's class</label><div class="row"><div><select id="ap">${opt(PROG,sel.program)}</select></div><div><select id="ai">${opt(INTK,sel.intake)}</select></div><div><select id="ab">${opt(BATCH,sel.batch)}</select></div><div><select id="al">${opt(LV,sel.level)}</select></div></div>
@@ -302,7 +297,7 @@ const act={
  async rsave(){const rows=parseRoster($('#rt').value);if(!rows.length)throw Error('No valid lines found. Use: StudentID, Full name');await api.upload(rows);editRt=false;note(rows.length+' students saved. This class list now applies to all your courses.','ok');render()},
  async addc(){const names=[...new Set($('#cn').value.split(/[\n,;]+/).map(x=>x.trim()).filter(Boolean))];if(!names.length)throw Error('Enter at least one course name');if(names.some(n=>n.length>80))throw Error('Course names must be 80 characters or less');if(names.length>20)throw Error('Add 20 courses at most at a time');
   await api.addCourses(names);note(names.length+(names.length>1?' courses added':' course added'),'ok');render()},
- async open(b){curWeek=+$('#wk').value;await api.open(b.dataset.id,+$('#mn').value,curWeek);msg='';render()},
+ async open(b){curWeek=+$('#wk').value;await api.open(b.dataset.id,curWeek);msg='';render()},
  async clr(b){if(!confirm('Delete all attendance records for this course? Keep your downloaded Excel file safe.'))return;await api.clear(b.dataset.id);note('Course data cleared','ok');render()},
  async wipe(){if(prompt('Type CLEAR to delete ALL attendance records for every class')!=='CLEAR')return;await api.wipe();note('All attendance data cleared','ok');render()},
  async close(b){await api.close(b.dataset.id);render()},
@@ -318,8 +313,14 @@ $('#adm').addEventListener('click',()=>{if(me&&me.role==='admin')return go('admi
 $('#adm').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();e.target.click()}});
 $('#mode').textContent=live?'':'Demo mode: data is kept in memory only. Demo ID: S001 (Regular, September, 2023, 100).';
 setInterval(()=>document.querySelectorAll('[data-live]').forEach(async el=>{
- if(+el.dataset.exp<=Date.now()&&!el.dataset.busy){el.dataset.busy=1;el.textContent='······';try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.remove('flip');void el.offsetWidth;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){}el.dataset.busy=''}
- el.style.setProperty('--p',Math.max(0,Math.min(1,(+el.dataset.exp-Date.now())/4e4)));const cd=el.nextElementSibling;if(cd)cd.textContent='Code clears in '+Math.max(0,Math.ceil((+el.dataset.exp-Date.now())/1e3))+'s'}),1000);
+ if(el.dataset.done)return;
+ const finish=async why=>{el.dataset.done=1;el.textContent='······';let n='';try{n=' '+(await api.list({id:el.dataset.sid})).length+' student(s) marked for week '+el.dataset.wk+'.'}catch(e){}note((why||'The code has cleared.')+n+' To get a new code, open the course again.');render()};
+ if(!+el.dataset.exp){if(el.dataset.busy)return;el.dataset.busy=1;
+  try{const c=await api.liveCode(el.dataset.live);el.textContent=c.code;el.classList.add('flip');el.dataset.exp=Date.now()+c.left*1e3}catch(e){return finish('This code has already expired.')}
+  el.dataset.busy=''}
+ const left=+el.dataset.exp-Date.now();
+ if(left<=0)return finish('The 40-second code has cleared.');
+ el.style.setProperty('--p',Math.max(0,Math.min(1,left/4e4)));const cd=el.nextElementSibling;if(cd)cd.textContent='Code clears in '+Math.ceil(left/1e3)+'s'}),1000);
 if(CFG.url&&CFG.key&&!window.supabase)showErr('Could not load the Supabase library, so the site is running in demo mode. Check the internet connection, or whether something is blocking cdn.jsdelivr.net.');
 else if(live)sb.rpc('lookup_student',{p_class:'x',p_sid:'x'}).then(r=>{if(r.error)showErr('Cannot reach the database: '+r.error.message+'. If this mentions permission or not found, run schema-update.sql again.')},e=>showErr('Cannot reach the database: '+e.message));
 render();
